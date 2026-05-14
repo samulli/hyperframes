@@ -1,14 +1,5 @@
-/**
- * Unit tests for the harness mode plumbing — `parseHarnessModeFlag`,
- * `checkDistributedSupport`, and `resolveMinPsnrForMode`.
- *
- * These do NOT exercise the render pipeline itself. The byte-identical-retry
- * contract is covered by `services/distributed/renderChunk.test.ts` and the
- * PSNR contract is covered by `Dockerfile.test` running the harness with
- * `--mode=distributed-simulated` against the smallest existing fixture.
- * What lives here is the dispatch logic that decides which mode runs and
- * which fixtures skip.
- */
+// Pure-function tests for the harness mode dispatch logic. End-to-end
+// PSNR contract lives in `Dockerfile.test` runs of the regression harness.
 
 import { describe, expect, it } from "bun:test";
 import {

@@ -26,7 +26,7 @@
  * format and adapter.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Fps } from "@hyperframes/core";
 import { assemble, plan, renderChunk } from "./distributed.js";
@@ -35,29 +35,12 @@ import { assemble, plan, renderChunk } from "./distributed.js";
 export type HarnessMode = "in-process" | "distributed-simulated";
 
 /**
- * Minimum PSNR (in dB) at which a distributed-simulated render is considered
- * equivalent to its in-process baseline.
- *
- * `DISTRIBUTED-RENDERING-PLAN.md` §5.1 names ≥50 dB as the
- * distributed-vs-in-process equivalence floor, but that target was written
- * against per-render comparisons (one fresh in-process render vs one fresh
- * distributed render). The regression harness compares against a frozen
- * baseline file, and the in-process renderer itself drifts against that
- * baseline by varying amounts depending on the composition's dynamics:
- *   - Static compositions (font-variant-numeric): ~48 dB drift
- *   - Rapid transitions (many-cuts): 34-44 dB drift
- * Both modes share the same encoder/JPEG-capture jitter floor, so this is
- * a property of the fixture's content, not of either renderer.
- *
- * The harness therefore uses the fixture's own `minPsnr` for both modes:
- * distributed must pass the same quality threshold the in-process renderer
- * passes against the same baseline. A distributed regression that pushes
- * PSNR below the fixture's tolerance is caught the same way an in-process
- * regression would be.
- *
- * This constant is retained as a non-zero floor for absolute pathology
- * (e.g. a chunk renders as fully black), independent of how lenient the
- * fixture's authored threshold is.
+ * Absolute pathology floor for `--mode=distributed-simulated` — catches
+ * a chunk that renders fully-black against a fixture authored with a
+ * permissive `minPsnr`. Non-pathological drift is caught by the fixture's
+ * own threshold; both modes share the same encoder/JPEG-capture jitter
+ * floor against the frozen baseline file, so the §5.1 50 dB target is
+ * unreachable for either mode and isn't a useful per-test gate.
  */
 export const DISTRIBUTED_SIMULATED_MIN_PSNR_DB = 10;
 
@@ -156,7 +139,6 @@ export async function runDistributedSimulatedRender(
 ): Promise<void> {
   const planDir = join(input.tempRoot, "plan");
   const chunksDir = join(input.tempRoot, "chunks");
-  const { mkdirSync } = await import("node:fs");
   mkdirSync(planDir, { recursive: true });
   mkdirSync(chunksDir, { recursive: true });
 

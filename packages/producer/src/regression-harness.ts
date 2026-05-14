@@ -717,17 +717,13 @@ async function runTestSuite(
         result.skipped = { reason: support.reason };
         return result;
       }
-      // The support check narrows `fps.num` to 24|30|60; assert here so
-      // TS sees the literal type that `DistributedRenderConfig.fps`
-      // requires. The check itself rejected every other value above.
+      // `checkDistributedSupport` already narrowed fps to {24,30,60} and
+      // rejected webm; the `as` casts surface those guarantees to TS.
       const fpsNum = suite.meta.renderConfig.fps.num as 24 | 30 | 60;
-      const distributedFormat: "mp4" | "mov" | "png-sequence" =
-        suite.meta.renderConfig.format === "webm"
-          ? // Unreachable — checkDistributedSupport rejected webm above.
-            (() => {
-              throw new Error("webm reached distributed render path");
-            })()
-          : (suite.meta.renderConfig.format ?? "mp4");
+      const distributedFormat = (suite.meta.renderConfig.format ?? "mp4") as
+        | "mp4"
+        | "mov"
+        | "png-sequence";
       await runDistributedSimulatedRender({
         projectDir: tempSrcDir,
         tempRoot,

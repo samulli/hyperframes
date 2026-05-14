@@ -25,11 +25,8 @@
  *     (`buildVirtualTimeShim({ seedRandomFromFrame: true })`) so any
  *     composition that uses `Math.random` / `crypto.getRandomValues`
  *     produces byte-identical pixels per `(planDir, chunkIndex)`.
- *   - The `lastFrameCache` priming step that earlier versions tried to
- *     emit before the first capture was removed — every frame in the
- *     capture loop seeks fresh DOM, so the cache is never consulted on
- *     the read path, and emitting the priming beginFrame at the chunk's
- *     first absolute frame deadlocked Chrome's compositor.
+ *   - No `lastFrameCache` priming: every frame seeks fresh DOM so the
+ *     cache is never read, and priming would deadlock the compositor.
  *   - The chunk's encode runs with `lockGopForChunkConcat: true` and
  *     `gopSize === framesInChunk` so concat-copy at assemble time is safe.
  *
@@ -39,10 +36,11 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import type { Page } from "puppeteer-core";
 import {
   assertSwiftShader,
+  type BeforeCaptureHook,
   BROWSER_GPU_NOT_SOFTWARE,
   type CaptureOptions,
   type CaptureSession,
@@ -55,8 +53,6 @@ import {
   getEncoderPreset,
   initializeSession,
   resolveConfig,
-  type VideoElement,
-  type VideoMetadata,
 } from "@hyperframes/engine";
 import { defaultLogger } from "../../logger.js";
 import { runEncodeStage } from "../render/stages/encodeStage.js";
@@ -69,7 +65,12 @@ import {
 import { sha256Hex } from "../render/stages/planHash.js";
 import { applyRuntimeEnvSnapshot } from "../render/runtimeEnvSnapshot.js";
 import { buildVirtualTimeShim, createFileServer, type FileServerHandle } from "../fileServer.js";
-import { buildSyntheticRenderJob, readFfmpegVersion } from "./shared.js";
+import {
+  buildSyntheticRenderJob,
+  PLAN_VIDEOS_META_RELATIVE_PATH,
+  type PlanVideosJson,
+  readFfmpegVersion,
+} from "./shared.js";
 
 /**
  * Non-retryable error codes raised when the planDir is structurally
@@ -132,35 +133,11 @@ export interface ChunkResult {
 }
 
 /**
- * On-disk shape of `<planDir>/meta/videos.json` written by `plan()`.
- * Mirrored from `plan.ts`'s internal `PlanVideosJson` — duplicated here so
- * `renderChunk` doesn't import from `plan.ts` (which would create a cycle).
- */
-interface PlanVideosJson {
-  videos: VideoElement[];
-  extracted: Array<{
-    videoId: string;
-    srcPath: string;
-    framePattern: string;
-    fps: number;
-    totalFrames: number;
-    metadata: VideoMetadata;
-  }>;
-}
-
-/**
  * Rebuild the engine's in-memory `ExtractedFrames[]` from the on-disk
- * planDir layout. `plan()` wrote a serialized manifest of which videos
- * exist + per-video frame counts; `<planDir>/video-frames/<videoId>/`
- * holds the actual numbered frame files. This walks each video's output
- * directory, populates the `framePaths` Map keyed by 1-based frame index
- * (the convention `videoFrameInjector` and `FrameLookupTable` both rely
- * on), and returns the structures ready to feed back into
- * `createFrameLookupTable`.
- *
- * Pure: no Chrome involvement, no engine launch. Used by `renderChunk`
- * once per chunk to recreate the BeforeCaptureHook the in-process
- * renderer produces from a live extraction stage.
+ * planDir layout. `<planDir>/video-frames/<videoId>/` holds the numbered
+ * frame files plan() extracted; this lists each dir and rebuilds the
+ * 1-based `framePaths` Map that `FrameLookupTable` / `videoFrameInjector`
+ * both index against.
  */
 function rebuildExtractedFramesFromPlanDir(
   planDir: string,
@@ -175,13 +152,11 @@ function rebuildExtractedFramesFromPlanDir(
           `${outputDir} not present. plan() should have written frames here; the planDir is malformed.`,
       );
     }
-    // The framePattern from extractAllVideoFrames looks like
-    // `frame_%06d.jpg`. We can't sprintf at runtime, so list the dir and
-    // index by sorted name — the encoder writes frame_NNNNNN.<ext> in
-    // monotonic order, so sorted-by-name is also sorted-by-frame-index.
-    const ext = v.framePattern.includes(".")
-      ? v.framePattern.slice(v.framePattern.lastIndexOf(".")).toLowerCase()
-      : ".jpg";
+    // framePattern looks like `frame_%05d.jpg`; sprintf isn't available at
+    // runtime so list-and-sort the directory. Sorted-by-name matches
+    // sorted-by-frame-index because the extractor writes zero-padded
+    // monotonic indices.
+    const ext = (extname(v.framePattern) || ".jpg").toLowerCase();
     const frames = readdirSync(outputDir)
       .filter((name) => name.toLowerCase().endsWith(ext))
       .sort();
@@ -189,10 +164,7 @@ function rebuildExtractedFramesFromPlanDir(
     for (let i = 0; i < frames.length; i++) {
       const frameName = frames[i];
       if (!frameName) continue;
-      // FrameLookupTable / videoFrameInjector index frames 1-based; the
-      // extractor writes frame_000001, frame_000002, ... so the on-disk
-      // names are already 1-based but we use the sorted-list position to
-      // be tolerant of gaps.
+      // FrameLookupTable indexes frames 1-based.
       framePaths.set(i + 1, join(outputDir, frameName));
     }
     result.push({
@@ -348,11 +320,9 @@ export async function renderChunk(
   const encoder = JSON.parse(readFileSync(encoderJsonPath, "utf-8")) as LockedRenderConfig;
   const chunks = JSON.parse(readFileSync(chunksJsonPath, "utf-8")) as ChunkSliceJson[];
 
-  // Optional: `meta/videos.json` is present whenever the composition has
-  // `<video>` elements. Absence is fine — compositions without video skip
-  // the frame-extraction stage entirely and don't need an injector.
-  // Presence drives the BeforeCaptureHook below.
-  const videosJsonPath = join(planDir, "meta", "videos.json");
+  // `meta/videos.json` only exists when the composition has `<video>`
+  // elements; absence means no injector is needed.
+  const videosJsonPath = join(planDir, PLAN_VIDEOS_META_RELATIVE_PATH);
   let planVideos: PlanVideosJson | null = null;
   if (existsSync(videosJsonPath)) {
     try {
@@ -469,6 +439,22 @@ export async function renderChunk(
       forceScreenshot: encoder.forceScreenshot,
     };
 
+    // Rebuild the BeforeCaptureHook that injects pre-extracted video
+    // frames into the page. Computed once per chunk and reused — the
+    // `createRenderVideoFrameInjector` callback `runCaptureStage` accepts
+    // can fire on every frame, and re-listing `planDir/video-frames/`
+    // each time would be wasteful (the directory contents don't change
+    // for the duration of a chunk render). Compositions with no video
+    // elements produce `null` here, matching the in-process renderer's
+    // skip path.
+    const chunkVideoInjectorFactory = (): BeforeCaptureHook | null => {
+      if (!planVideos || planVideos.extracted.length === 0) return null;
+      const extracted = rebuildExtractedFramesFromPlanDir(planDir, planVideos.extracted);
+      const frameLookup = createFrameLookupTable(planVideos.videos, extracted);
+      return createVideoFrameInjector(frameLookup);
+    };
+    const cachedVideoInjector = chunkVideoInjectorFactory();
+
     // ── Per-chunk work + frames directories ──
     // Suffix workDir with pid + random bytes so concurrent invocations on
     // the SAME `(planDir, chunkIndex)` (e.g. a scheduler that double-fires
@@ -520,36 +506,10 @@ export async function renderChunk(
       await assertSwiftShader(session.page, readWebGlVendorInfoFromCanvas);
       await initializeSession(session);
 
-      // Note: `discardWarmupCapture` is intentionally NOT called here.
-      //
-      // The helper was originally added to prime Chrome's
-      // `lastFrameCache` so that — if the chunk's first real capture
-      // happened to return `hasDamage=false` — the cached bytes would
-      // match what an in-process renderer's cache held at the same
-      // absolute frame index. In practice, every frame in the chunk's
-      // capture loop seeks fresh DOM via `__hf.seek(absoluteTime)`
-      // before the screenshot, which means `hasDamage=true` on every
-      // frame and `lastFrameCache` is never consulted on the read path.
-      //
-      // Two failure modes made the call actively harmful:
-      //   - calling it with the chunk's first absolute frame caused
-      //     captureStage to issue a second `HeadlessExperimental.beginFrame`
-      //     at the same `frameTimeTicks` Chrome's compositor had just
-      //     advanced to. Chrome blocks the second call indefinitely
-      //     waiting for new damage; the render hangs at protocolTimeout.
-      //   - calling it with `startFrame - 1` (an attempt to prime against
-      //     the prior frame) advanced compositor time past the chunk's
-      //     first capture, then the first real capture asked the
-      //     compositor to go backward in time, which wedged it the same
-      //     way.
-      //
-      // The byte-identical-retry contract holds without the priming:
-      // both retries of the same `(planDir, chunkIndex)` enter the
-      // capture loop in identical state (fresh session, locked warmup,
-      // virtual-time-shimmed page) and seek the same absolute times in
-      // the same order. The lastFrameCache fallback only matters for a
-      // hasDamage=false frame, which doesn't appear under fresh-seek
-      // captures.
+      // `discardWarmupCapture` is intentionally NOT called: every frame
+      // seeks fresh DOM, so `lastFrameCache` is never read; priming it
+      // would deadlock Chrome's compositor by issuing a second beginFrame
+      // at a `frameTimeTicks` it had just advanced to.
 
       // ── Capture the chunk's range via runCaptureStage ──
       await runCaptureStage({
@@ -570,20 +530,7 @@ export async function renderChunk(
         needsAlpha: plan.dimensions.format !== "mp4",
         captureAttempts: [],
         buildCaptureOptions: () => captureOptions,
-        // Rebuild the in-process renderer's video-frame injector from the
-        // planDir's `meta/videos.json` + `video-frames/<id>/`. Without
-        // this, the chunk worker's page falls back to letting Chrome's
-        // native `<video>` element decode the source mp4 against the
-        // virtual clock, which produces ±1-frame drift relative to the
-        // in-process renderer that pre-extracts frames and injects them
-        // as images. Compositions with no `<video>` elements get a
-        // null injector (no overhead, same as in-process).
-        createRenderVideoFrameInjector: () => {
-          if (!planVideos || planVideos.extracted.length === 0) return null;
-          const extracted = rebuildExtractedFramesFromPlanDir(planDir, planVideos.extracted);
-          const frameLookup = createFrameLookupTable(planVideos.videos, extracted);
-          return createVideoFrameInjector(frameLookup);
-        },
+        createRenderVideoFrameInjector: () => cachedVideoInjector,
         abortSignal: undefined,
         assertNotAborted: () => {},
         frameRange: { startFrame: slice.startFrame, endFrame: slice.endFrame },

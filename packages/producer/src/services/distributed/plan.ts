@@ -36,12 +36,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { type CanvasResolution } from "@hyperframes/core";
-import {
-  type EngineConfig,
-  type ExtractedFrames,
-  resolveConfig,
-  type VideoElement,
-} from "@hyperframes/engine";
+import { type EngineConfig, resolveConfig } from "@hyperframes/engine";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import { runAudioStage } from "../render/stages/audioStage.js";
 import { runCompileStage } from "../render/stages/compileStage.js";
@@ -60,7 +55,13 @@ import {
 } from "../render/stages/planHash.js";
 import { validateNoGpuEncode, validateNoSystemFonts } from "../render/planValidation.js";
 import { snapshotRuntimeEnv } from "../render/runtimeEnvSnapshot.js";
-import { buildSyntheticRenderJob, readFfmpegVersion, readProducerVersion } from "./shared.js";
+import {
+  buildSyntheticRenderJob,
+  PLAN_VIDEOS_META_RELATIVE_PATH,
+  type PlanVideosJson,
+  readFfmpegVersion,
+  readProducerVersion,
+} from "./shared.js";
 
 /**
  * Caller-supplied configuration for a distributed render. `fps`, `width`,
@@ -144,6 +145,15 @@ export interface PlanResult {
   ffmpegVersion: string;
   producerVersion: string;
 }
+
+/**
+ * Skip patterns for the `projectDir → planDir/compiled/` pre-seed copy.
+ * Real projects often contain `node_modules/`, VCS metadata, and harness
+ * artifacts that have no business in a planDir — they bloat the 2 GB
+ * planDir cap and slow the S3/Lambda round-trip for no benefit.
+ */
+const PLAN_PROJECT_DIR_COPY_SKIP =
+  /(^|\/)(node_modules|\.git|\.cache|output|failures|dist|\.next|\.turbo)(\/|$)/;
 
 /** Default chunk size in frames (~8s @ 30fps; fits Lambda's 15-min cap). */
 export const DEFAULT_CHUNK_SIZE = 240;
@@ -434,42 +444,6 @@ function buildLockedRenderConfig(input: {
 }
 
 /**
- * Persisted shape of the video-extraction outputs from `runExtractVideosStage`,
- * written to `<planDir>/meta/videos.json` for `renderChunk` to reconstruct
- * a `FrameLookupTable` from. The in-process renderer keeps these structures
- * in memory; the distributed pipeline writes them out so a separate chunk
- * worker process can rebuild the video-frame injector without re-running
- * the extract stage.
- *
- * `ExtractedFrames` from the engine carries an absolute `outputDir`,
- * an open file descriptor in some paths, and a `framePaths` map — none of
- * those survive a serialize → re-deserialize round trip across processes.
- * The serialized form keeps only what plan-time produced and lets
- * `renderChunk` re-derive `outputDir` (always `<planDir>/video-frames/<videoId>`)
- * and `framePaths` (re-listed from that directory).
- */
-interface PlanVideosJson {
-  /**
-   * Composition's `<video>` elements in document order. Identical to
-   * `composition.videos` from `compileForRender` — the chunk worker uses
-   * this to drive `createFrameLookupTable`'s time/index math.
-   */
-  videos: VideoElement[];
-  /**
-   * Per-video extraction outputs. `outputDir` is omitted — `renderChunk`
-   * reconstructs it from `<planDir>/video-frames/<videoId>/`.
-   */
-  extracted: Array<{
-    videoId: string;
-    srcPath: string;
-    framePattern: string;
-    fps: number;
-    totalFrames: number;
-    metadata: ExtractedFrames["metadata"];
-  }>;
-}
-
-/**
  * Per-format encoder + pixel-format + preset triple. Distributed mode is
  * SDR-only: H.264 8-bit for mp4, ProRes 4444 for mov, raw RGBA for
  * png-sequence.
@@ -542,25 +516,19 @@ export async function plan(
   if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true });
   const compiledDir = join(workDir, "compiled");
 
-  // Pre-seed the compiled directory with the composition's local assets
-  // (CSS, JS, images, fonts, etc. referenced by relative URL from the
-  // entry HTML). The in-process renderer's file server serves these
-  // straight from `projectDir`, so they don't need to be in the compiled
-  // tree there. The distributed chunk worker's file server, by contrast,
-  // serves ONLY from `<planDir>/compiled/` — without these assets, a
-  // composition like `<link rel="stylesheet" href="style.css">` resolves
-  // to a 404 and the rendered chunk is the page's unstyled fallback.
-  //
-  // `compileStage`'s `writeCompiledArtifacts` runs after this and
-  // overwrites the entry HTML with the compiled bytes (and writes
-  // sub-compositions + external-projectDir assets). Everything we pre-seed
-  // here is local to `projectDir` and stays in the planDir as the
-  // canonical asset bundle the chunk worker will serve.
+  // Pre-seed the compiled directory with `projectDir`'s local assets
+  // (style.css, script.js, images, etc.). The chunk worker's file server
+  // serves ONLY from `<planDir>/compiled/`, so without this copy a
+  // composition's `<link rel=stylesheet href=style.css>` 404s and the
+  // first capture lands an unstyled fallback frame. `compileStage`
+  // overwrites the entry HTML afterwards. `dereference: true` resolves
+  // symlinks so the planDir survives S3 / Lambda /tmp round-trips.
   mkdirSync(compiledDir, { recursive: true });
-  // `dereference: true` resolves symlinks before copying — planDirs are
-  // shipped across process / machine boundaries (S3, Lambda /tmp,
-  // worker pods), and symlinks won't survive the round-trip.
-  cpSync(projectDir, compiledDir, { recursive: true, dereference: true });
+  cpSync(projectDir, compiledDir, {
+    recursive: true,
+    dereference: true,
+    filter: (src) => !PLAN_PROJECT_DIR_COPY_SKIP.test(src),
+  });
 
   // The compiled directory lives at `<planDir>/compiled/` in the final
   // layout. The stages write under `<planDir>/.plan-work/compiled/`; we
@@ -652,15 +620,9 @@ export async function plan(
     assertNotAborted,
     materializeSymlinks: true,
   });
-  // DO NOT call `extractResult.frameLookup.cleanup()` here. cleanup()
-  // rm-rfs each video's outputDir, which for the in-process renderer is
-  // a scratch tree the orchestrator owns. In plan(), that "scratch" tree
-  // (`compiledDir/__hyperframes_video_frames/<videoId>/`) IS the source
-  // material for `planDir/video-frames/`; cleanup before the rename
-  // leaves the planDir with only the `_downloads/` subdirectory and no
-  // actual per-video frame files, and the chunk worker can't reconstruct
-  // the BeforeCaptureHook without them. The renames below move the tree
-  // into its final planDir location.
+  // Skip `extractResult.frameLookup.cleanup()`: it would rm-rf each
+  // video's outputDir, but in `plan()` those directories ARE the source
+  // material the renames below move into `planDir/video-frames/`.
 
   // ── Audio ──
   const audioResult = await runAudioStage({
@@ -691,16 +653,12 @@ export async function plan(
   if (existsSync(finalCompiledDir)) rmSync(finalCompiledDir, { recursive: true, force: true });
   renameSync(compiledDir, finalCompiledDir);
 
-  // Persist the video-extraction outputs alongside the rest of the planDir
-  // metadata so `renderChunk` can rebuild the BeforeCaptureHook that
-  // injects pre-extracted frames into the page. Without this file the
-  // chunk worker has no way to recover the per-video frame timing and
-  // falls back to letting Chrome's native `<video>` element decode the
-  // source mp4 on the fly — which produces ±1-frame drift relative to
-  // the in-process renderer's pre-extracted injection (the source of
-  // every committed baseline). Writing this file is the contract that
-  // makes distributed renders pixel-comparable to in-process renders for
-  // compositions with video sources.
+  // `meta/videos.json` is the contract that makes distributed renders
+  // pixel-comparable to in-process for compositions with video sources —
+  // without it, renderChunk can't rebuild the BeforeCaptureHook and the
+  // page's native `<video>` element decodes the source mp4 ~1 frame
+  // off the pre-extracted images the in-process baseline was captured
+  // from.
   const planVideosJson: PlanVideosJson = {
     videos: composition.videos,
     extracted: (extractResult.extractionResult?.extracted ?? []).map((ext) => ({
@@ -712,9 +670,12 @@ export async function plan(
       metadata: ext.metadata,
     })),
   };
-  const metaDir = join(planDir, "meta");
-  if (!existsSync(metaDir)) mkdirSync(metaDir, { recursive: true });
-  writeFileSync(join(metaDir, "videos.json"), JSON.stringify(planVideosJson, null, 2), "utf-8");
+  mkdirSync(join(planDir, "meta"), { recursive: true });
+  writeFileSync(
+    join(planDir, PLAN_VIDEOS_META_RELATIVE_PATH),
+    JSON.stringify(planVideosJson, null, 2),
+    "utf-8",
+  );
 
   const planAudioPath = join(planDir, "audio.aac");
   if (audioResult.hasAudio && existsSync(audioResult.audioOutputPath)) {
