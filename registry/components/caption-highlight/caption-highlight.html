@@ -62,7 +62,7 @@
         flex-wrap: wrap;
         align-items: flex-end;
         justify-content: center;
-        gap: 16px;
+        gap: 8px;
         padding: 0 100px;
         opacity: 0;
         visibility: hidden;
@@ -77,14 +77,18 @@
         letter-spacing: 0.02em;
         line-height: 1;
         position: relative;
-        padding: 8px 16px;
-        will-change: transform;
+        padding: 6px 12px 8px;
+        text-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+        transform-origin: 50% 58%;
+        will-change: transform, filter;
       }
       .hl-word-bg {
         position: absolute;
         inset: 0;
-        background: #e5143a;
-        border-radius: 8px;
+        background: linear-gradient(135deg, #ff1745 0%, #df1238 100%);
+        border-radius: 10px;
+        box-shadow: 0 12px 30px rgba(229, 20, 58, 0.32);
+        opacity: 0;
         transform: scaleX(0);
         transform-origin: 0% 50%;
         z-index: -1;
@@ -105,15 +109,6 @@
       data-width="1920"
       data-height="1080"
     >
-      <video
-        id="hl-video"
-        muted
-        playsinline
-        data-start="0"
-        data-duration="8"
-        data-track-index="0"
-        data-has-audio="false"
-      ></video>
       <div class="hl-overlay"></div>
       <div id="hl-container"></div>
     </div>
@@ -227,8 +222,8 @@
           tl.set(grp, { visibility: "visible" }, g.start);
           tl.fromTo(
             grp,
-            { opacity: 0, y: 20 },
-            { opacity: 1, y: 0, duration: 0.2, ease: "power3.out" },
+            { opacity: 0 },
+            { opacity: 1, duration: 0.12, ease: "power2.out" },
             g.start,
           );
 
@@ -237,18 +232,22 @@
             var bgEl = document.getElementById("hl-bg-" + wi);
             var wordEl = document.getElementById("hl-w-" + wi);
 
-            tl.to(bgEl, { scaleX: 1, duration: 0.15, ease: "power2.out" }, w.start);
-            tl.to(wordEl, { scale: 1.08, duration: 0.08, ease: "power2.out" }, w.start);
-            tl.to(wordEl, { scale: 1, duration: 0.12, ease: "power2.inOut" }, w.start + 0.08);
+            tl.to(bgEl, { opacity: 1, scaleX: 1, duration: 0.15, ease: "power2.out" }, w.start);
             tl.to(
-              bgEl,
-              { scaleX: 0, transformOrigin: "100% 50%", duration: 0.12, ease: "power2.in" },
-              w.end,
+              wordEl,
+              { filter: "brightness(1.05)", duration: 0.08, ease: "power2.out" },
+              w.start,
             );
-            tl.set(bgEl, { transformOrigin: "0% 50%" }, w.end + 0.12);
+            tl.to(
+              wordEl,
+              { filter: "brightness(1)", duration: 0.16, ease: "power2.out" },
+              w.start + 0.08,
+            );
+            tl.to(bgEl, { opacity: 0, scaleX: 1.02, duration: 0.1, ease: "power2.in" }, w.end);
+            tl.set(bgEl, { scaleX: 0 }, w.end + 0.1);
           });
 
-          tl.to(grp, { opacity: 0, y: -15, duration: 0.2, ease: "power2.in" }, g.end - 0.2);
+          tl.to(grp, { opacity: 0, duration: 0.1, ease: "power2.in" }, g.end - 0.1);
           tl.set(grp, { opacity: 0, visibility: "hidden" }, g.end);
         });
 
