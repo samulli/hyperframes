@@ -254,6 +254,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       };
 
       // Run render asynchronously, mutating the state object
+      const startTime = Date.now();
       (async () => {
         try {
           const { createRenderJob, executeRenderJob } = await import("@hyperframes/producer");
@@ -280,30 +281,23 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             ...(manualEditsRenderScript ? { renderBodyScripts: [manualEditsRenderScript] } : {}),
             ...(opts.composition ? { entryFile: opts.composition } : {}),
           });
-          const startTime = Date.now();
-          let lastStage: string | undefined;
           const onProgress = (j: { progress: number; currentStage?: string }) => {
             state.progress = j.progress;
-            if (j.currentStage) {
-              state.stage = j.currentStage;
-              lastStage = j.currentStage;
-            }
+            if (j.currentStage) state.stage = j.currentStage;
           };
-          try {
-            await executeRenderJob(job, opts.project.dir, opts.outputPath, onProgress);
-          } catch (renderErr) {
-            emitStudioRenderError(opts, Date.now() - startTime, lastStage, renderErr);
-            throw renderErr;
-          }
-          const elapsed = Date.now() - startTime;
+          await executeRenderJob(job, opts.project.dir, opts.outputPath, onProgress);
           state.status = "complete";
           state.progress = 100;
           const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
-          writeFileSync(metaPath, JSON.stringify({ status: "complete", durationMs: elapsed }));
-          emitStudioRenderComplete(opts, elapsed, job.perfSummary);
+          writeFileSync(
+            metaPath,
+            JSON.stringify({ status: "complete", durationMs: Date.now() - startTime }),
+          );
+          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary);
         } catch (err) {
           state.status = "failed";
           state.error = err instanceof Error ? err.message : String(err);
+          emitStudioRenderError(opts, Date.now() - startTime, state.stage, err);
           try {
             const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
             writeFileSync(metaPath, JSON.stringify({ status: "failed" }));
