@@ -137,6 +137,35 @@ describe("resolveProjectRelativeSrc — sub-composition path clamping", () => {
       join(compiledDir, "assets/foo.mp4"),
     );
   });
+
+  it("resolves percent-encoded non-Latin filenames across scripts", () => {
+    const projectDir = join(tmp, "project");
+    const cases = [
+      ["arabic", "%D9%87%D9%86%D8%A7-%D9%85%D8%B1%D9%88%D8%A7.mp4"],
+      ["japanese", "%E6%97%A5%E6%9C%AC%E8%AA%9E.mp4"],
+      ["cyrillic", "%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82.mp4"],
+      ["korean", "%ED%95%9C%EA%B8%80.mp4"],
+    ] as const;
+
+    for (const [, encodedFilename] of cases) {
+      const filename = decodeURIComponent(encodedFilename);
+      writeFileSync(join(projectDir, "assets", filename), "");
+
+      expect(resolveProjectRelativeSrc(`assets/${encodedFilename}`, projectDir)).toBe(
+        join(projectDir, "assets", filename),
+      );
+    }
+  });
+
+  it("falls back to literal filenames when percent sequences are malformed", () => {
+    const projectDir = join(tmp, "project");
+    const filename = "100%-discount.mp4";
+    writeFileSync(join(projectDir, "assets", filename), "");
+
+    expect(resolveProjectRelativeSrc(`assets/${filename}`, projectDir)).toBe(
+      join(projectDir, "assets", filename),
+    );
+  });
 });
 
 describe("parseVideoElements", () => {
