@@ -60,17 +60,19 @@ export interface UseDomSelectionReturn {
   buildDomSelectionFromTarget: (
     target: HTMLElement,
     options?: { preferClipAncestor?: boolean },
-  ) => DomEditSelection | null;
+  ) => Promise<DomEditSelection | null>;
   resolveDomSelectionFromPreviewPoint: (
     clientX: number,
     clientY: number,
     options?: { preferClipAncestor?: boolean },
-  ) => DomEditSelection | null;
+  ) => Promise<DomEditSelection | null>;
   updateDomEditHoverSelection: (selection: DomEditSelection | null) => void;
-  buildDomSelectionForTimelineElement: (element: TimelineElement) => DomEditSelection | null;
-  handleTimelineElementSelect: (element: TimelineElement | null) => void;
-  refreshDomEditSelectionFromPreview: (selection: DomEditSelection) => void;
-  refreshDomEditGroupSelectionsFromPreview: (selections: DomEditSelection[]) => void;
+  buildDomSelectionForTimelineElement: (
+    element: TimelineElement,
+  ) => Promise<DomEditSelection | null>;
+  handleTimelineElementSelect: (element: TimelineElement | null) => Promise<void>;
+  refreshDomEditSelectionFromPreview: (selection: DomEditSelection) => Promise<void>;
+  refreshDomEditGroupSelectionsFromPreview: (selections: DomEditSelection[]) => Promise<void>;
 }
 
 // ── Hook ──
@@ -193,24 +195,34 @@ export function useDomSelection({
   }, [applyDomSelection]);
 
   const buildDomSelectionFromTarget = useCallback(
-    (target: HTMLElement, options?: { preferClipAncestor?: boolean }) => {
+    (
+      target: HTMLElement,
+      options?: { preferClipAncestor?: boolean; skipSourceProbe?: boolean },
+    ) => {
       return resolveDomEditSelection(target, {
         activeCompositionPath: activeCompPath,
         isMasterView,
         preferClipAncestor: options?.preferClipAncestor,
+        skipSourceProbe: options?.skipSourceProbe,
+        projectId,
       });
     },
-    [activeCompPath, isMasterView],
+    [activeCompPath, isMasterView, projectId],
   );
 
   const resolveDomSelectionFromPreviewPoint = useCallback(
-    (clientX: number, clientY: number, options?: { preferClipAncestor?: boolean }) => {
+    async (
+      clientX: number,
+      clientY: number,
+      options?: { preferClipAncestor?: boolean; skipSourceProbe?: boolean },
+    ) => {
       const iframe = previewIframeRef.current;
       if (!iframe || captionEditMode) return null;
       const target = getPreviewTargetFromPointer(iframe, clientX, clientY, activeCompPath);
       if (!target) return null;
       return buildDomSelectionFromTarget(target, {
         preferClipAncestor: options?.preferClipAncestor,
+        skipSourceProbe: options?.skipSourceProbe,
       });
     },
     [activeCompPath, buildDomSelectionFromTarget, captionEditMode, previewIframeRef],
@@ -223,7 +235,7 @@ export function useDomSelection({
   }, []);
 
   const buildDomSelectionForTimelineElement = useCallback(
-    (element: TimelineElement): DomEditSelection | null => {
+    async (element: TimelineElement): Promise<DomEditSelection | null> => {
       const iframe = previewIframeRef.current;
       let doc: Document | null = null;
       try {
@@ -248,21 +260,21 @@ export function useDomSelection({
   );
 
   const handleTimelineElementSelect = useCallback(
-    (element: TimelineElement | null) => {
+    async (element: TimelineElement | null) => {
       if (!STUDIO_INSPECTOR_PANELS_ENABLED) return;
       if (!element) {
         applyDomSelection(null, { revealPanel: false });
         return;
       }
 
-      const selection = buildDomSelectionForTimelineElement(element);
+      const selection = await buildDomSelectionForTimelineElement(element);
       if (selection) applyDomSelection(selection);
     },
     [applyDomSelection, buildDomSelectionForTimelineElement],
   );
 
   const refreshDomEditSelectionFromPreview = useCallback(
-    (selection: DomEditSelection) => {
+    async (selection: DomEditSelection) => {
       const iframe = previewIframeRef.current;
       let doc: Document | null = null;
       try {
@@ -275,7 +287,7 @@ export function useDomSelection({
       const element = findElementForSelection(doc, selection, activeCompPath);
       if (!element) return;
 
-      const nextSelection = buildDomSelectionFromTarget(element);
+      const nextSelection = await buildDomSelectionFromTarget(element);
       if (nextSelection) {
         applyDomSelection(nextSelection, {
           revealPanel: false,
@@ -287,7 +299,7 @@ export function useDomSelection({
   );
 
   const refreshDomEditGroupSelectionsFromPreview = useCallback(
-    (selections: DomEditSelection[]) => {
+    async (selections: DomEditSelection[]) => {
       const iframe = previewIframeRef.current;
       let doc: Document | null = null;
       try {
@@ -301,7 +313,7 @@ export function useDomSelection({
       for (const selection of selections) {
         const element = findElementForSelection(doc, selection, activeCompPath);
         if (!element) continue;
-        const nextSelection = buildDomSelectionFromTarget(element);
+        const nextSelection = await buildDomSelectionFromTarget(element);
         if (nextSelection) nextGroup.push(nextSelection);
       }
       if (nextGroup.length === 0) return;
