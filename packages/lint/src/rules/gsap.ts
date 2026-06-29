@@ -4,6 +4,9 @@ interface LintParsedGsap {
     method: string;
     position: number | string;
     properties: Record<string, number | string>;
+    // fromTo() exposes its first ("from") vars object separately; a layout/reflow prop
+    // that appears only here still animates and must be checked.
+    fromProperties?: Record<string, number | string>;
     duration?: number;
     ease?: string;
     extras?: Record<string, unknown>;
@@ -1198,7 +1201,14 @@ export const gsapRules: LintRule<LintContext>[] = [
         ...parsed.animations.map((anim) => ({
           method: anim.method,
           selector: anim.targetSelector,
-          properties: Object.keys(anim.properties),
+          // Union the from-vars: a fromTo() can animate a layout/reflow prop that appears
+          // only in its first ("from") object, which is just as stutter-prone as the to-vars.
+          properties: [
+            ...new Set([
+              ...Object.keys(anim.properties),
+              ...Object.keys(anim.fromProperties ?? {}),
+            ]),
+          ],
           raw: synthesizeWindowRaw(parsed.timelineVar, anim),
         })),
         ...extractStandaloneGsapTransformCalls(stripJsComments(script.content)),

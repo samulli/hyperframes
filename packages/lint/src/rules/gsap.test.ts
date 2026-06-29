@@ -1499,6 +1499,22 @@ describe("GSAP rules", () => {
     expect(finding).toBeDefined();
   });
 
+  it("gsap_non_transform_motion: fires on a layout/reflow prop that appears only in a fromTo's from-object", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><div id="t"></div></div>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#t", { left: 100, letterSpacing: "0.3em" }, { opacity: 1, duration: 1 }, 0);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "gsap_non_transform_motion");
+    expect(finding).toBeDefined();
+  });
+
   it("gsap_non_transform_motion: fires on text-reflow props (letterSpacing / fontSize)", async () => {
     const html = `
 <html><body>
