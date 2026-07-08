@@ -594,10 +594,13 @@ export async function runCaptureStreamingStage(
             }
           },
           onFrameBuffer,
-          // Interleaved DE workers each need their own browser PROCESS: pages
-          // co-tenant in one browser starve non-active pages of BeginFrames on
-          // the drawElement paint-wait path (measured: 86s vs 30s on a
-          // 3,245-frame rAF comp; the shared-pool run degrades ~3x).
+          // Interleaved DE workers each need their own browser PROCESS:
+          // pages co-tenant in one browser share one compositor, whose
+          // internal frame scheduling deprioritizes non-active pages — their
+          // canvas `paint` events starve and the drawElement paint-wait slows
+          // ~3x (measured: 86s vs 30s on a 3,245-frame rAF comp). This is
+          // Chromium's internal frame-production scheduling on ALL platforms,
+          // NOT the Linux-only HeadlessExperimental.beginFrame capture mode.
           deParallelStream ? { ...captureCfg, enableBrowserPool: false } : captureCfg,
         );
       } catch (err) {
