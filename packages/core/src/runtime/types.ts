@@ -51,6 +51,8 @@ export type RuntimeTimelineClip = {
   start: number;
   duration: number;
   track: number;
+  zIndex: number;
+  stackingContextId: string | null;
   kind: "video" | "audio" | "image" | "element" | "composition";
   tagName: string | null;
   compositionId: string | null;

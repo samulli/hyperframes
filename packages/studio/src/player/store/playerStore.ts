@@ -28,6 +28,14 @@ export interface TimelineElement {
   start: number;
   duration: number;
   track: number;
+  /** Resolved z-index for stacking-aware timeline ordering. */
+  zIndex?: number;
+  /** Stacking context this element belongs to; root clips use the root composition id. */
+  stackingContextId?: string | null;
+  /** Nearest parent composition context, matching RuntimeTimelineClip. */
+  parentCompositionId?: string | null;
+  /** Composition ancestry from root to nearest parent, matching RuntimeTimelineClip. */
+  compositionAncestors?: string[];
   domId?: string;
   /** Stable `data-hf-id` attribute value — used as primary patch target when present */
   hfId?: string;

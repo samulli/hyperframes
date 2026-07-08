@@ -10,6 +10,7 @@
 
 import type { TimelineElement } from "../store/playerStore";
 import type { ClipManifestClip } from "./playbackTypes";
+import { getElementZIndex } from "./layerOrdering";
 import {
   resolveMediaElement,
   applyMediaMetadataFromElement,
@@ -65,6 +66,40 @@ function resolveClipTag(clip: ClipManifestClip): string {
   return clip.tagName || clip.kind || "div";
 }
 
+function resolveDomCompositionContext(
+  element: Element,
+  root: Element | null,
+): {
+  parentCompositionId: string | null;
+  compositionAncestors: string[];
+  stackingContextId: string | null;
+} {
+  const ancestors: string[] = [];
+  let parentCompositionId: string | null = null;
+  let cursor = element.parentElement;
+  while (cursor) {
+    const compositionId = cursor.getAttribute("data-composition-id");
+    if (compositionId) {
+      ancestors.push(compositionId);
+      if (!parentCompositionId && cursor !== root) {
+        parentCompositionId = compositionId;
+      }
+    }
+    cursor = cursor.parentElement;
+  }
+  const compositionAncestors = ancestors.reverse();
+  return {
+    parentCompositionId,
+    compositionAncestors,
+    stackingContextId: parentCompositionId ?? compositionAncestors[0] ?? null,
+  };
+}
+
+function getTimelineElementZIndex(element: Element | null): number | undefined {
+  if (!element || !("style" in element)) return undefined;
+  return getElementZIndex(element as HTMLElement);
+}
+
 // fallow-ignore-next-line complexity
 export function createTimelineElementFromManifestClip(params: {
   clip: ClipManifestClip;
@@ -86,6 +121,14 @@ export function createTimelineElementFromManifestClip(params: {
   let sourceFile: string | undefined;
 
   let hfId: string | undefined;
+  const domContext = hostEl
+    ? resolveDomCompositionContext(hostEl, doc?.querySelector("[data-composition-id]") ?? null)
+    : null;
+  const compositionAncestors = clip.compositionAncestors ?? domContext?.compositionAncestors;
+  const parentCompositionId = clip.parentCompositionId ?? domContext?.parentCompositionId;
+  const stackingContextId =
+    clip.stackingContextId ?? parentCompositionId ?? compositionAncestors?.[0] ?? null;
+
   if (hostEl) {
     domId = hostEl.id || undefined;
     hfId = hostEl.getAttribute("data-hf-id") || undefined;
@@ -112,6 +155,10 @@ export function createTimelineElementFromManifestClip(params: {
     start: clip.start,
     duration: clip.duration,
     track: clip.track,
+    zIndex: clip.zIndex ?? getTimelineElementZIndex(hostEl),
+    stackingContextId,
+    parentCompositionId,
+    compositionAncestors,
     domId,
     hfId,
     selector,
@@ -206,6 +253,7 @@ export function createImplicitTimelineLayersFromDOM(
     });
     if (existingKeys.has(identity.key) || existingKeys.has(identity.id)) continue;
 
+    const compositionContext = resolveDomCompositionContext(child, rootComp);
     layers.push({
       domId: child.id || undefined,
       hfId: child.getAttribute("data-hf-id") || undefined,
@@ -217,6 +265,10 @@ export function createImplicitTimelineLayersFromDOM(
       selectorIndex,
       sourceFile,
       start: 0,
+      zIndex: getTimelineElementZIndex(child),
+      stackingContextId: compositionContext.stackingContextId,
+      parentCompositionId: compositionContext.parentCompositionId,
+      compositionAncestors: compositionContext.compositionAncestors,
       tag: child.tagName.toLowerCase(),
       timingSource: "implicit",
       track: maxTrack + 1 + layers.length,
@@ -278,6 +330,7 @@ export function parseTimelineFromDOM(doc: Document, rootDuration: number): Timel
       selectorIndex,
       sourceFile,
     });
+    const compositionContext = resolveDomCompositionContext(el, rootComp);
     const entry: TimelineElement = {
       id: identity.id,
       label,
@@ -286,6 +339,10 @@ export function parseTimelineFromDOM(doc: Document, rootDuration: number): Timel
       start,
       duration: dur,
       track: isNaN(track) ? 0 : track,
+      zIndex: getTimelineElementZIndex(el),
+      stackingContextId: compositionContext.stackingContextId,
+      parentCompositionId: compositionContext.parentCompositionId,
+      compositionAncestors: compositionContext.compositionAncestors,
       domId: el.id || undefined,
       hfId: el.getAttribute("data-hf-id") || undefined,
       selector,
@@ -406,6 +463,10 @@ export function buildStandaloneRootTimelineElement(params: {
     start: 0,
     duration: params.rootDuration,
     track: 0,
+    zIndex: 0,
+    stackingContextId: params.compositionId,
+    parentCompositionId: null,
+    compositionAncestors: [params.compositionId],
     compositionSrc,
     selector: params.selector,
     selectorIndex: params.selectorIndex,
