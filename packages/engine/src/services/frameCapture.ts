@@ -525,6 +525,36 @@ async function initDrawElementOrTransparentBackground(
         await armStaticDedup(session, page, logInitPhase);
       }
     }
+    // Capability gate: `canvas.drawElementImage` is an unlaunched Blink feature
+    // that only exists on recent Dev/Canary Chrome builds (~151+); it is absent
+    // from Stable and from most pinned/system Chrome installs. The
+    // `--enable-features=CanvasDrawElement` flag no-ops silently on a build that
+    // doesn't implement it, so without this probe the first drawElementImage()
+    // call throws `TypeError: ... is not a function` deep inside the capture
+    // loop and takes the whole render down instead of falling back (HF#2060).
+    // Cheap (no paint-wait) and must run before any other drawElement work.
+    // Not gated by forceDE (HF_FORCE_DRAWELEMENT, an R&D knob that bypasses the
+    // quality gates below to measure raw damage) — there's no "forced but
+    // degraded" mode for a method that doesn't exist, only a crash, so this
+    // always routes to the fallback instead.
+    const supportsDrawElement = await page.evaluate(() => {
+      const c = document.createElement("canvas");
+      const ctx = c.getContext("2d");
+      return (
+        typeof (ctx as unknown as { drawElementImage?: unknown })?.drawElementImage === "function"
+      );
+    });
+    if (!supportsDrawElement) {
+      session.deGateReason = "unsupported_chrome";
+      console.log(
+        `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
+          "this Chrome build does not implement canvas.drawElementImage (Dev/Canary-only " +
+          "feature, ~151+); run `hyperframes browser ensure --force` to fetch a supported " +
+          "build, or set HYPERFRAMES_BROWSER_PATH to one.",
+      );
+      await routeToFallback();
+      return;
+    }
     // SwiftShader gate: drawElement's only advantage is skipping the GPU→CPU
     // screenshot-readback IPC. On a software rasterizer (Docker/CI, no GPU) both
     // paths block on identical software raster, so drawElement is parity-or-slower
