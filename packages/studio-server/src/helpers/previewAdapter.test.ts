@@ -293,6 +293,18 @@ describe("T10 — PreviewAdapter contract (spec for R7)", () => {
       expect(timings["hf-orphan"].start).toBeUndefined();
     });
 
+    it("returns undefined start when the reference target exists but its own timing is unresolvable", () => {
+      make("div", { "data-hf-id": "hf-untimed" }); // no data-end, no data-duration
+      make("div", {
+        "data-hf-id": "hf-outro",
+        "data-start": "hf-untimed + 2",
+        "data-duration": "1",
+      });
+      const adapter = adapterWith(() => null);
+      const timings = adapter.getElementTimings();
+      expect(timings["hf-outro"].start).toBeUndefined();
+    });
+
     it("terminates (not an infinite loop) on a mutual A <-> B reference cycle", () => {
       make("div", { "data-hf-id": "hf-a", "data-start": "hf-b", "data-duration": "2" });
       make("div", { "data-hf-id": "hf-b", "data-start": "hf-a", "data-duration": "3" });

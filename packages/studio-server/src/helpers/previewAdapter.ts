@@ -147,6 +147,12 @@ export function createPreviewAdapter(
       // has no data-end) — this function never read data-duration before either,
       // so a reference to a duration-authored (not end-authored) clip used to be
       // unresolvable regardless of the parseFloat bug.
+      //
+      // This is the third copy of "resolve relative data-start" (runtime
+      // startResolver.ts; the SDK's own getElementTimings in session.ts; this
+      // one). The runtime version is substantially more complex (host offsets,
+      // media, live timelines) so a shared extraction isn't a straightforward
+      // win — this one and the SDK's stay hand-kept in sync instead.
       const startCache = new Map<Element, number | undefined>();
       const visiting = new Set<Element>();
 
@@ -184,6 +190,11 @@ export function createPreviewAdapter(
           } else if (expr?.kind === "absolute") {
             resolved = expr.value;
           } else {
+            // parseStartExpression returns null for empty/absent data-start, and
+            // also for a malformed grammar string (e.g. "3 abc" — a leading
+            // number followed by content the reference regex rejects). The
+            // parseFloat below only ever succeeds on that second, malformed
+            // case (a clean number or a clean reference already matched above).
             const sv = startStr !== null ? parseFloat(startStr) : NaN;
             resolved = Number.isFinite(sv) ? sv : undefined;
           }
