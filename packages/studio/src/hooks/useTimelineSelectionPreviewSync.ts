@@ -88,13 +88,20 @@ export function useTimelineSelectionPreviewSync({
     let cancelled = false;
     const syncSelection = async () => {
       const selections: DomEditSelection[] = [];
+      let resolvableCount = 0;
       for (const id of selectedIds) {
         const element = timelineElements.find((item) => (item.key ?? item.id) === id);
         if (!element) continue;
+        resolvableCount += 1;
         const selection = await buildDomSelectionForTimelineElement(element);
         if (selection) selections.push(selection);
       }
       if (cancelled) return;
+      // The store is the source of truth: applying a partial set would write that
+      // shrunk set back and silently drop the members whose DOM node was not ready.
+      // Bail instead; a later effect run (on timelineElements/DOM change) applies the
+      // full set once every resolvable member has a live node.
+      if (selections.length < resolvableCount) return;
       if (selections.length === 0) {
         applyDomSelection(null, { revealPanel: false });
       } else if (selections.length === 1) {

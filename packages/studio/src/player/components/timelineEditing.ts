@@ -2,6 +2,7 @@ import { formatTime } from "../lib/time";
 import { roundToCenti } from "../../utils/rounding";
 import type { StackingTimelineLayer, TimelineLayerId } from "./timelineTrackOrder";
 import { resolveTimelineLayerStackingMove } from "./timelineLayerDrag";
+import { shouldShowTimelineLayerGroupHeader } from "./TimelineLayerGroupHeader";
 import type { TimelineStackingElement, TimelineStackingReorderIntent } from "./timelineStacking";
 
 import {
@@ -348,7 +349,7 @@ export function selectTimelineElementsInMarquee({
   for (const layerId of layerOrder) {
     const layer = layerById.get(layerId);
     if (!layer) continue;
-    if (layer.contextKey !== "" && layer.contextKey !== previousContextKey) {
+    if (shouldShowTimelineLayerGroupHeader(layer.contextKey, previousContextKey)) {
       rowTop += groupHeaderHeight;
     }
     const rowBottom = rowTop + trackHeight;
