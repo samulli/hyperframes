@@ -625,4 +625,23 @@ describe("variable declarations (Composition API)", () => {
       { id: "brand-color", type: "color", label: "Brand color", default: "#0066cc" },
     ]);
   });
+
+  it("declareVariable / removeVariable both support redo after undo", async () => {
+    const comp = await openComposition(VARIABLES_HTML);
+
+    comp.declareVariable({ id: "brand-title", type: "string", label: "Title", default: "Hi" });
+    comp.undo();
+    comp.redo();
+    expect(comp.listVariables()).toEqual([
+      { id: "brand-color", type: "color", label: "Brand color", default: "#0066cc" },
+      { id: "brand-title", type: "string", label: "Title", default: "Hi" },
+    ]);
+
+    comp.removeVariable("brand-color");
+    comp.undo();
+    comp.redo();
+    expect(comp.listVariables()).toEqual([
+      { id: "brand-title", type: "string", label: "Title", default: "Hi" },
+    ]);
+  });
 });

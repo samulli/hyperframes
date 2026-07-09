@@ -933,10 +933,13 @@ function handleRemoveVariable(parsed: ParsedDocument, id: string): MutationResul
   const path = variableDeclPath(id);
   // Bundle the original array index so undo reinserts at the same position
   // instead of appending — mirrors handleRemoveElement's {html, parentId,
-  // siblingIndex} inverse value.
+  // siblingIndex} inverse value. Tagged with __kind (rather than relying on
+  // structural "decl"/"index" key presence) because VariableDecl has an open
+  // index signature — a genuine variable schema could legally declare its own
+  // "decl"/"index" fields, which a structural check alone can't rule out.
   return {
     forward: [patchRemove(path)],
-    inverse: [patchAdd(path, { decl: removed.decl, index: removed.index })],
+    inverse: [patchAdd(path, { __kind: "reinsert", decl: removed.decl, index: removed.index })],
   };
 }
 
@@ -1546,6 +1549,8 @@ export function validateOp(parsed: ParsedDocument, op: EditOp): CanResult {
       return CAN_OK;
     }
     case "setVariableValue":
+    case "declareVariable":
+    case "removeVariable":
       if (findRoot(parsed.document) === null)
         return canErr("E_NO_ROOT", "Composition root element not found.");
       return CAN_OK;

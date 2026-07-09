@@ -155,8 +155,17 @@ class CompositionImpl implements Composition {
     this.dispatch({ type: "setVariableValue", id, value });
   }
 
-  getVariableValue(id: string): unknown {
-    return readVariableDefault(this.parsed.document, id);
+  getVariableValue(id: string): string | number | boolean | FontValue | ImageValue | undefined {
+    // readVariableDefault genuinely can't narrow beyond unknown — the schema
+    // isn't validated at read time — so the cast lives here at the SDK
+    // boundary rather than pushing it onto every caller of getVariableValue.
+    return readVariableDefault(this.parsed.document, id) as
+      | string
+      | number
+      | boolean
+      | FontValue
+      | ImageValue
+      | undefined;
   }
 
   listVariables(): CompositionVariable[] {

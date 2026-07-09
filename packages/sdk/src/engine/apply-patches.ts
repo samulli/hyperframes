@@ -256,13 +256,19 @@ function applyOne(parsed: ParsedDocument, patch: JsonPatchOp, p: ParsedPath): vo
       if (patch.op === "remove") {
         removeVariableDecl(parsed.document, p.id);
       } else {
-        // Undo of removeVariable bundles {decl, index} to reinsert at the
-        // original array position; a plain declareVariable forward/replace
-        // patch carries the bare decl. Disambiguate on shape — VariableDecl's
-        // own index signature means "in" narrowing can't fully eliminate it
-        // from the union, so re-cast explicitly once shape is confirmed.
+        // Undo of removeVariable bundles {__kind: "reinsert", decl, index} to
+        // reinsert at the original array position; a plain declareVariable
+        // forward/replace patch carries the bare decl. Disambiguate on the
+        // __kind tag, not structural "decl"/"index" key presence — VariableDecl
+        // has an open index signature, so a genuine variable schema could
+        // legally declare its own "decl"/"index" fields, and "in" narrowing
+        // alone can't rule that out.
         const value = patch.value;
-        if (value && typeof value === "object" && "decl" in value && "index" in value) {
+        if (
+          value &&
+          typeof value === "object" &&
+          (value as { __kind?: unknown }).__kind === "reinsert"
+        ) {
           const wrapped = value as { decl: VariableDecl; index: number };
           declareVariableDecl(parsed.document, wrapped.decl, { atIndex: wrapped.index });
         } else {

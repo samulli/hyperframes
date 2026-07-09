@@ -410,7 +410,7 @@ export interface Composition {
   addElement(parent: HfId | null, index: number, html: string): HfId;
   setVariableValue(id: string, value: string | number | boolean | FontValue | ImageValue): void;
   /** Current `default` value for a declared variable, or undefined if undeclared/unset. */
-  getVariableValue(id: string): unknown;
+  getVariableValue(id: string): string | number | boolean | FontValue | ImageValue | undefined;
   /** Every declared variable's full schema (id/type/label/default/…), or [] when none. */
   listVariables(): CompositionVariable[];
   /**

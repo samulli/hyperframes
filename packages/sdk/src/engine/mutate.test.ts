@@ -999,6 +999,25 @@ describe("declareVariable", () => {
     applyPatchesToDocument(parsed, edited.inverse);
     expect(serializeDocument(parsed)).toBe(before);
   });
+
+  it("a decl whose own extension data includes 'decl'/'index' keys isn't mistaken for a wrapped reinsert", () => {
+    // VariableDecl has an open index signature, so a real, weird schema can
+    // legally carry fields named "decl"/"index" as ordinary extension data —
+    // this must NOT be confused with removeVariable's {__kind: "reinsert",
+    // decl, index} inverse-patch wrapper, which is disambiguated by __kind,
+    // not by structural key presence.
+    const parsed = fresh();
+    const pathologicalDecl = {
+      id: "weird-var",
+      type: "string",
+      label: "Weird",
+      default: "x",
+      decl: "not-a-real-decl",
+      index: 999,
+    };
+    applyOp(parsed, { type: "declareVariable", decl: pathologicalDecl });
+    expect(readVarDecl(parsed, "weird-var")).toEqual(pathologicalDecl);
+  });
 });
 
 describe("removeVariable", () => {
@@ -1128,6 +1147,29 @@ describe("validateOp", () => {
 
   it("returns ok:true for setCompositionMetadata (no target)", () => {
     expect(validateOp(fresh(), { type: "setCompositionMetadata", width: 100 }).ok).toBe(true);
+  });
+
+  it("returns ok:true for declareVariable / removeVariable when a root exists", () => {
+    expect(
+      validateOp(fresh(), {
+        type: "declareVariable",
+        decl: { id: "v1", type: "string", label: "V1", default: "x" },
+      }).ok,
+    ).toBe(true);
+    expect(validateOp(fresh(), { type: "removeVariable", id: "v1" }).ok).toBe(true);
+  });
+
+  it("returns ok:false / E_NO_ROOT for declareVariable / removeVariable with no root", () => {
+    const parsed = parseMutable(`no elements at all — just text`);
+    const r1 = validateOp(parsed, {
+      type: "declareVariable",
+      decl: { id: "v1", type: "string", label: "V1", default: "x" },
+    });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.code).toBe("E_NO_ROOT");
+    const r2 = validateOp(parsed, { type: "removeVariable", id: "v1" });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.code).toBe("E_NO_ROOT");
   });
 });
 
