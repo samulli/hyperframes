@@ -35,8 +35,7 @@ import type { PersistAdapter, PreviewAdapter } from "./adapters/types.js";
 import { parseMutable } from "./engine/model.js";
 import type { ParsedDocument } from "./engine/model.js";
 import { applyOp, validateOp, type MutationResult } from "./engine/mutate.js";
-import { getGsapScript, resolveScoped } from "./engine/model.js";
-import { readVariableDefault, listVariableDecls } from "./engine/variableModel.js";
+import { getGsapScript, resolveScoped, declarationElement } from "./engine/model.js";
 import { extractGsapLabels } from "@hyperframes/core/gsap-parser-acorn";
 import { stripEmbeddedRuntimeScripts } from "@hyperframes/core/compiler/html-document";
 import { parseStartExpression } from "@hyperframes/core/runtime/start-expression";
@@ -167,12 +166,11 @@ class CompositionImpl implements Composition {
     this.dispatch({ type: "setVariableValue", id, value });
   }
 
-  // ── #2098 CRUD conveniences (coexist with the canonical surface below) ──
+  // ── #2098 CRUD conveniences — thin aliases over the canonical surface below.
+  // They delegate so the per-file declaration-element scope (template/fragment
+  // sub-comps included) is resolved in exactly one place.
   getVariableValue(id: string): string | number | boolean | FontValue | ImageValue | undefined {
-    // readVariableDefault genuinely can't narrow beyond unknown — the schema
-    // isn't validated at read time — so the cast lives here at the SDK
-    // boundary rather than pushing it onto every caller of getVariableValue.
-    return readVariableDefault(this.parsed.document, id) as
+    return this.getVariableValues()[id] as
       | string
       | number
       | boolean
@@ -182,10 +180,7 @@ class CompositionImpl implements Composition {
   }
 
   listVariables(): CompositionVariable[] {
-    // Same VariableDecl (index-signature) -> CompositionVariable (closed union)
-    // boundary cast as handleDeclareVariable — the model trusts the schema is
-    // well-formed rather than validating each decl's shape at read time.
-    return listVariableDecls(this.parsed.document) as unknown as CompositionVariable[];
+    return this.getVariableDeclarations();
   }
 
   removeVariable(id: string): void {
@@ -208,7 +203,7 @@ class CompositionImpl implements Composition {
   }
 
   getVariableDeclarations(): CompositionVariable[] {
-    return readVariableDeclarations(this.parsed.document);
+    return readVariableDeclarations(declarationElement(this.parsed.document, this.parsed.wrapped));
   }
 
   getVariableValues(overrides?: Record<string, unknown>): Record<string, unknown> {
@@ -220,9 +215,9 @@ class CompositionImpl implements Composition {
     // (core/runtime/getVariables.ts) additionally walks inlined sub-composition
     // declarers because it operates on the bundled multi-composition document;
     // the SDK models one composition file, so per-file scope is intended.
-    const documentEl =
-      (this.parsed.document as Document & { documentElement?: Element }).documentElement ?? null;
-    const defaults = readDeclaredDefaults(documentEl);
+    const defaults = readDeclaredDefaults(
+      declarationElement(this.parsed.document, this.parsed.wrapped),
+    );
     return { ...defaults, ...(overrides ?? {}) };
   }
 
