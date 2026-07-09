@@ -569,6 +569,7 @@ export const TimelineCanvas = memo(function TimelineCanvas({
         rangeSelection={rangeSelection}
         marqueeRect={marqueeRect}
         pps={pps}
+        accentColor={getTrackStyle("").accent}
       />
 
       {/* Playhead — hidden while dragging a beat so its guideline doesn't

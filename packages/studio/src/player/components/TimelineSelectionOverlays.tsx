@@ -6,12 +6,15 @@ interface TimelineSelectionOverlaysProps {
   rangeSelection: TimelineRangeSelection | null;
   marqueeRect: TimelineMarqueeOverlayRect | null;
   pps: number;
+  /** Primary/accent color (hex) shared with the rest of the timeline chrome. */
+  accentColor: string;
 }
 
 export function TimelineSelectionOverlays({
   rangeSelection,
   marqueeRect,
   pps,
+  accentColor,
 }: TimelineSelectionOverlaysProps) {
   return (
     <>
@@ -23,9 +26,9 @@ export function TimelineSelectionOverlays({
             width: Math.abs(rangeSelection.end - rangeSelection.start) * pps,
             top: RULER_H,
             bottom: 0,
-            backgroundColor: "rgba(59, 130, 246, 0.12)",
-            borderLeft: "1px solid rgba(59, 130, 246, 0.4)",
-            borderRight: "1px solid rgba(59, 130, 246, 0.4)",
+            backgroundColor: `${accentColor}1f`,
+            borderLeft: `1px solid ${accentColor}`,
+            borderRight: `1px solid ${accentColor}`,
             zIndex: 50,
           }}
         />
@@ -40,8 +43,8 @@ export function TimelineSelectionOverlays({
             top: marqueeRect.top,
             width: marqueeRect.width,
             height: marqueeRect.height,
-            backgroundColor: "rgba(96, 165, 250, 0.16)",
-            border: "1px solid rgba(147, 197, 253, 0.72)",
+            backgroundColor: `${accentColor}29`,
+            border: `1px solid ${accentColor}`,
             boxShadow: "0 0 0 1px rgba(15, 23, 42, 0.35)",
             zIndex: 60,
           }}
