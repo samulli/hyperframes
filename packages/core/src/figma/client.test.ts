@@ -175,7 +175,7 @@ describe("error mapping", () => {
     expect(waits).toEqual([5000]);
   });
 
-  it("names the library_content scope in the styles 403 message", async () => {
+  it("names the endpoint scope in the styles 403 when the body is silent", async () => {
     const client = createFigmaClient({
       token: "t",
       fetch: fetchStub(() => jsonResponse(403, { message: "no" })).fetch,
@@ -186,6 +186,77 @@ describe("error mapping", () => {
         message: expect.stringContaining("library_content:read"),
       }),
     );
+  });
+
+  it("surfaces figma's own scope diagnosis verbatim from the 403 body (err field)", async () => {
+    const client = createFigmaClient({
+      token: "t",
+      fetch: fetchStub(() =>
+        jsonResponse(403, {
+          err: "Invalid scope(s): file_content:read, file_metadata:read. This endpoint requires the library_content:read scope",
+        }),
+      ).fetch,
+    });
+    await expect(client.styles("F")).rejects.toThrowError(
+      expect.objectContaining({
+        code: "FORBIDDEN",
+        message: expect.stringContaining("requires the library_content:read scope"),
+      }),
+    );
+  });
+
+  it("reclassifies a 403 'Invalid token' body as BAD_TOKEN, not a scope problem", async () => {
+    // figma returns 403 (not 401) for bad PATs on file endpoints — verified live
+    const client = createFigmaClient({
+      token: "t",
+      fetch: fetchStub(() => jsonResponse(403, { err: "Invalid token" })).fetch,
+    });
+    const err = await client.styles("F").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FigmaClientError);
+    if (err instanceof FigmaClientError) {
+      expect(err.code).toBe("BAD_TOKEN");
+      expect(err.message).toContain("Re-mint");
+    }
+  });
+
+  it("keeps REQUIRES_ENTERPRISE for a scopeless variables 403", async () => {
+    const client = createFigmaClient({
+      token: "t",
+      fetch: fetchStub(() => jsonResponse(403, { message: "no" })).fetch,
+    });
+    await expect(client.variables("F")).rejects.toThrowError(
+      expect.objectContaining({ code: "REQUIRES_ENTERPRISE" }),
+    );
+  });
+});
+
+describe("renderNodes (batch)", () => {
+  it("fetches many nodes in ONE /v1/images call and maps each url", async () => {
+    const stub = fetchStub(() =>
+      jsonResponse(200, {
+        images: { "1:2": "https://cdn/a.png", "3:4": "https://cdn/b.png" },
+      }),
+    );
+    const client = createFigmaClient({ token: "t", fetch: stub.fetch });
+    const out = await client.renderNodes("F", ["1:2", "3:4"], { format: "png" });
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]).toContain("ids=1%3A2%2C3%3A4"); // "1:2,3:4" url-encoded
+    expect(out).toEqual([
+      { nodeId: "1:2", url: "https://cdn/a.png", ext: "png" },
+      { nodeId: "3:4", url: "https://cdn/b.png", ext: "png" },
+    ]);
+  });
+
+  it("returns url:null for a node figma couldn't render, without failing the batch", async () => {
+    const client = createFigmaClient({
+      token: "t",
+      fetch: fetchStub(() =>
+        jsonResponse(200, { images: { "1:2": "https://cdn/a.png", "3:4": null } }),
+      ).fetch,
+    });
+    const out = await client.renderNodes("F", ["1:2", "3:4"], { format: "svg" });
+    expect(out[0]?.url).toBe("https://cdn/a.png");
+    expect(out[1]?.url).toBeNull();
   });
 
   it("wraps other failures as HTTP_ERROR with status", async () => {

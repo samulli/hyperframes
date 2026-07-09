@@ -51,10 +51,12 @@ Parse the user's figma link with `parseFigmaRef` (URL, `fileKey:nodeId`, bare `f
 ## Assets (Phase 1 — CLI)
 
 ```bash
-hyperframes figma asset '<url-or-fileKey:nodeId>' [--format svg|png|jpg|pdf] [--scale 2] [--description "..."] [--entity "..."]
+hyperframes figma asset '<url-or-fileKey:nodeId>' [more refs…] [--format svg|png|jpg|pdf] [--scale 2] [--description "..."] [--entity "..."]
 ```
 
 Renders over REST, sanitizes SVG, freezes under `.media/images/`, appends the manifest with provenance, regenerates `.media/index.md` (the shared media-use inventory), prints an `<img>` snippet. Idempotent per `fileKey:nodeId:format:scale:version`. Prefer SVG for vectors/logos (scalable, animatable), PNG `--scale 2` for raster fidelity. **Always pass `--description "<what it is>"`** (it becomes the index row + `<img alt>`); add `--entity "<name>"` for named brand marks so media-use `resolve --entity` finds them later (entity hits match across image/icon).
+
+**Batch many nodes in ONE request** — pass several refs (space-separated or comma-joined) of the SAME file: `hyperframes figma asset 'KEY:1-2' 'KEY:3-4' 'KEY:5-6'`. All render in a single `/v1/images` call, which is figma's own answer to the per-minute rate limit — prefer it over N separate commands when pulling a whole frame's worth of assets. `--description`/`--entity` apply to every node in the batch, so batch nodes that share a purpose. 429s also auto-retry with backoff regardless.
 
 ## Tokens (Phase 2 — CLI)
 

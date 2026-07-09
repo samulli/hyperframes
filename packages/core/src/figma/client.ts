@@ -76,8 +76,24 @@ export interface FigmaFileVersion {
   lastModified: string;
 }
 
+/** One batch render result — url is null when figma couldn't render that
+ *  node (a bad node id in the batch shouldn't fail the whole call). */
+export interface BatchRenderedNode {
+  nodeId: string;
+  url: string | null;
+  ext: FigmaAssetFormat;
+}
+
 export interface FigmaClient {
   renderNode(ref: FigmaRef, opts: RenderNodeOptions): Promise<RenderedNode>;
+  /** Batch render many nodes of ONE file in a single /v1/images call — the
+   *  documented rate-limit workaround (comma-separated ids). Per-node
+   *  failures come back as url:null rather than throwing the batch. */
+  renderNodes(
+    fileKey: string,
+    nodeIds: string[],
+    opts: RenderNodeOptions,
+  ): Promise<BatchRenderedNode[]>;
   imageFills(fileKey: string): Promise<Map<string, string>>;
   variables(fileKey: string): Promise<FigmaVariablesResult>;
   styles(fileKey: string): Promise<FigmaStyleMeta[]>;
@@ -115,6 +131,29 @@ function retryAfterMs(res: Response): number | null {
   if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
   const date = Date.parse(raw);
   return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
+}
+
+/** Figma's error bodies are precise — "Invalid token", or "Invalid scope(s):
+ *  … requires the X scope" — and worth surfacing verbatim instead of a
+ *  generic guess. The message lives under `err` on most endpoints but
+ *  `message` on /variables; read both. Returns null when unparseable. */
+async function readFigmaErrorMessage(res: Response): Promise<string | null> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    return null;
+  }
+  try {
+    const body: unknown = JSON.parse(text);
+    if (isRecord(body)) {
+      if (typeof body.err === "string") return body.err;
+      if (typeof body.message === "string") return body.message;
+    }
+  } catch {
+    // non-JSON body — fall through
+  }
+  return text.trim() === "" ? null : text.trim();
 }
 
 function requireNodeId(ref: FigmaRef): string {
@@ -172,8 +211,42 @@ export function createFigmaClient(options: FigmaClientOptions): FigmaClient {
     scopeHint?: string;
   }
 
+  /** Map a 403 to the right typed error using figma's own response body:
+   *  "Invalid token" is a bad PAT (figma returns 403, NOT 401, for these on
+   *  file endpoints), "Invalid scope(s) … requires X" is a missing scope
+   *  surfaced verbatim. Falls back to the endpoint's scopeHint when the body
+   *  is silent. */
+  function forbiddenError(body: string | null, opts: GetOptions): FigmaClientError {
+    if (body && /invalid token/i.test(body))
+      throw new FigmaClientError(
+        "BAD_TOKEN",
+        "figma rejected the token (403 Invalid token) — it is invalid, expired, or revoked. Re-mint at figma.com/settings → Security, then update FIGMA_TOKEN.",
+        403,
+      );
+    if (opts.enterpriseGated)
+      return new FigmaClientError(
+        "REQUIRES_ENTERPRISE",
+        "figma variables require an Enterprise plan (403) — fall back to styles",
+        403,
+      );
+    if (body && /scope/i.test(body))
+      return new FigmaClientError(
+        "FORBIDDEN",
+        `figma denied access (403): ${body} — add the named scope at figma.com/settings → Security → Personal access tokens.`,
+        403,
+      );
+    const scopeLine = opts.scopeHint
+      ? `This endpoint needs the "${opts.scopeHint}" scope — add it at figma.com/settings → Security → Personal access tokens.`
+      : "The token is missing a read scope, or your account can't view this file. Check File content: Read-only + File metadata: Read-only at figma.com/settings → Security.";
+    return new FigmaClientError(
+      "FORBIDDEN",
+      `figma denied access (403). ${scopeLine} Also confirm the file is visible to your account.`,
+      403,
+    );
+  }
+
   /** Throw the typed error for a non-ok response (no-op when res.ok). */
-  function throwForStatus(res: Response, path: string, opts: GetOptions): void {
+  async function throwForStatus(res: Response, path: string, opts: GetOptions): Promise<void> {
     if (res.ok) return;
     if (res.status === 401)
       throw new FigmaClientError(
@@ -181,22 +254,7 @@ export function createFigmaClient(options: FigmaClientOptions): FigmaClient {
         "figma rejected the token (401) — it is expired or revoked. Re-mint at figma.com/settings → Security, then update FIGMA_TOKEN.",
         401,
       );
-    if (res.status === 403 && opts.enterpriseGated)
-      throw new FigmaClientError(
-        "REQUIRES_ENTERPRISE",
-        "figma variables require an Enterprise plan (403) — fall back to styles",
-        403,
-      );
-    if (res.status === 403) {
-      const scopeLine = opts.scopeHint
-        ? `This endpoint needs the "${opts.scopeHint}" scope — add it at figma.com/settings → Security → Personal access tokens.`
-        : "The token is missing a read scope, or your account can't view this file. Check File content: Read-only + File metadata: Read-only at figma.com/settings → Security.";
-      throw new FigmaClientError(
-        "FORBIDDEN",
-        `figma denied access (403). ${scopeLine} Also confirm the file is visible to your account.`,
-        403,
-      );
-    }
+    if (res.status === 403) throw forbiddenError(await readFigmaErrorMessage(res), opts);
     if (res.status === 429)
       throw new FigmaClientError(
         "RATE_LIMITED",
@@ -221,26 +279,40 @@ export function createFigmaClient(options: FigmaClientOptions): FigmaClient {
       const wait = retryAfterMs(res) ?? 1000 * 2 ** attempt;
       await sleep(wait);
     }
-    throwForStatus(res, path, opts);
+    await throwForStatus(res, path, opts);
     return res.json();
   }
 
   return {
     async renderNode(ref, opts) {
       const nodeId = requireNodeId(ref);
-      const params = new URLSearchParams({ ids: nodeId, format: opts.format });
-      if (opts.scale !== undefined) params.set("scale", String(opts.scale));
-      const body = await get(`/v1/images/${ref.fileKey}?${params}`, {
-        scopeHint: SCOPE_HINTS.fileContent,
-      });
-      const images = isRecord(body) && isRecord(body.images) ? body.images : {};
-      const url = images[nodeId];
-      if (typeof url !== "string" || url === "")
+      const [result] = await this.renderNodes(ref.fileKey, [nodeId], opts);
+      if (!result || result.url === null)
         throw new FigmaClientError(
           "RENDER_FAILED",
           `figma could not render node ${nodeId} as ${opts.format}`,
         );
-      return { url, ext: opts.format };
+      return { url: result.url, ext: opts.format };
+    },
+
+    async renderNodes(fileKey, nodeIds, opts) {
+      if (nodeIds.length === 0) return [];
+      // /v1/images accepts comma-separated ids — one call for the whole batch,
+      // which is figma's own answer to the per-minute rate limit.
+      const params = new URLSearchParams({ ids: nodeIds.join(","), format: opts.format });
+      if (opts.scale !== undefined) params.set("scale", String(opts.scale));
+      const body = await get(`/v1/images/${fileKey}?${params}`, {
+        scopeHint: SCOPE_HINTS.fileContent,
+      });
+      const images = isRecord(body) && isRecord(body.images) ? body.images : {};
+      return nodeIds.map((nodeId) => {
+        const url = images[nodeId];
+        return {
+          nodeId,
+          url: typeof url === "string" && url !== "" ? url : null,
+          ext: opts.format,
+        };
+      });
     },
 
     async imageFills(fileKey) {
