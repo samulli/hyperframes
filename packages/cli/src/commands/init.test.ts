@@ -50,8 +50,7 @@ describe("hyperframes init flag rename", () => {
       expect(pkg.type).toBe("module");
       expect(pkg.scripts).toMatchObject({
         dev: "npx --yes hyperframes preview",
-        check:
-          "npx --yes hyperframes lint && npx --yes hyperframes validate && npx --yes hyperframes inspect",
+        check: "npx --yes hyperframes check",
         render: "npx --yes hyperframes render",
         publish: "npx --yes hyperframes publish",
       });
@@ -84,8 +83,7 @@ describe("hyperframes init flag rename", () => {
       };
       expect(pkg.scripts).toMatchObject({
         dev: "npx --yes hyperframes preview",
-        check:
-          "npx --yes hyperframes lint && npx --yes hyperframes validate && npx --yes hyperframes inspect",
+        check: "npx --yes hyperframes check",
         render: "npx --yes hyperframes render",
         publish: "npx --yes hyperframes publish",
       });

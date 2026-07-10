@@ -224,9 +224,7 @@ function hyperframesScript(command: string): string {
 function buildPackageScripts(): Record<string, string> {
   return {
     dev: hyperframesScript("preview"),
-    check:
-      `${hyperframesScript("lint")} && ${hyperframesScript("validate")} && ` +
-      `${hyperframesScript("inspect")}`,
+    check: hyperframesScript("check"),
     render: hyperframesScript("render"),
     publish: hyperframesScript("publish"),
   };
