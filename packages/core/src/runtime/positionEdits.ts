@@ -201,7 +201,7 @@ export function installPositionEditsSeekReapply(win: Window & typeof globalThis)
 
   const isWrapped = (fn: unknown): fn is SeekFunction =>
     typeof fn === "function" &&
-    (wrappedSeekFunctions.has(fn) ||
+    (wrappedSeekFunctions.has(fn as SeekFunction) ||
       Boolean((fn as { [SEEK_REAPPLY_WRAPPED]?: boolean })[SEEK_REAPPLY_WRAPPED]));
 
   const markWrapped = (fn: SeekFunction): void => {
