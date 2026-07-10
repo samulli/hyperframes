@@ -15,11 +15,20 @@ interface RectInput {
   height: number;
 }
 
+afterEach(() => {
+  vi.restoreAllMocks();
+  document.body.innerHTML = "";
+  Reflect.deleteProperty(document, "elementFromPoint");
+  Reflect.deleteProperty(window, "__hyperframesLayoutAudit");
+  clearGeometryCollector();
+});
+
 describe("layout-audit.browser", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     document.body.innerHTML = "";
     delete (window as unknown as { __hyperframesLayoutAudit?: unknown }).__hyperframesLayoutAudit;
+    clearGeometryCollector();
   });
 
   it("uses authored canvas dimensions when the root bounding rect is degenerate", () => {
@@ -135,6 +144,206 @@ describe("layout-audit.browser", () => {
 
     expect(runAudit().some((issue) => issue.code === "text_box_overflow")).toBe(true);
   });
+
+  it("keeps auditing visible descendants beyond the second element", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="first"></div>
+        <div id="second"></div>
+        <div id="third"></div>
+        <div id="late">Late visible copy</div>
+      </div>
+    `;
+    installGeometry({
+      root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+      late: rect({ left: 700, top: 100, width: 140, height: 40 }),
+      text: rect({ left: 700, top: 100, width: 140, height: 40 }),
+    });
+    installAuditScript();
+
+    expect(runAudit()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "canvas_overflow", selector: "#late" }),
+      ]),
+    );
+  });
+});
+
+it("is inert unless text or media candidates are explicitly requested", () => {
+  document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="copy">Visible copy</div>
+      </div>
+    `;
+  installGeometry({
+    root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+    copy: rect({ left: 100, top: 100, width: 200, height: 40 }),
+    text: rect({ left: 100, top: 100, width: 200, height: 40 }),
+  });
+  installAuditScript();
+
+  expect(runGeometryCandidates({ text: false, media: false, tolerance: 2 })).toEqual([]);
+});
+
+it("returns own-text rects and media overflow while excluding caption layers", () => {
+  document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <section data-composition-file="scenes/hero.html">
+          <div id="copy" data-layout-name="copy">Own copy <span id="nested">Nested</span></div>
+          <img id="image" src="data:image/png;base64,AA==" />
+          <svg id="vector"></svg>
+        </section>
+        <div class="caption-layer"><p id="caption">Authored captions</p></div>
+      </div>
+    `;
+  installGeometry({
+    root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+    copy: rect({ left: 100, top: 260, width: 180, height: 40 }),
+    headline: rect({ left: 100, top: 260, width: 180, height: 40 }),
+    nested: rect({ left: 220, top: 260, width: 60, height: 40 }),
+    image: rect({ left: 600, top: 40, width: 200, height: 100 }),
+    vector: rect({ left: -130, top: 160, width: 100, height: 100 }),
+    caption: rect({ left: 200, top: 300, width: 240, height: 40 }),
+    text: rect({ left: 100, top: 260, width: 100, height: 40 }),
+  });
+  installAuditScript();
+
+  const candidates = runGeometryCandidates({ text: true, media: true, tolerance: 2 });
+
+  expect(candidates).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "text",
+        tag: "div",
+        text: "Own copy",
+        selector: "#copy",
+        sourceFile: "scenes/hero.html",
+        rect: { left: 100, top: 260, right: 200, bottom: 300, width: 100, height: 40 },
+        elementRect: { left: 100, top: 260, right: 280, bottom: 300, width: 180, height: 40 },
+      }),
+      expect.objectContaining({
+        kind: "media",
+        tag: "img",
+        selector: "#image",
+        overflow: { right: 160 },
+      }),
+      expect.objectContaining({
+        kind: "media",
+        tag: "svg",
+        selector: "#vector",
+        overflow: { left: 130 },
+      }),
+    ]),
+  );
+  expect(candidates.some((candidate) => candidate.selector === "#caption")).toBe(false);
+});
+
+it("scans body-level composition siblings and includes a media boundary root", () => {
+  document.body.innerHTML = `
+    <canvas id="boundary" data-composition-id="background" data-width="640" data-height="360"></canvas>
+    <div id="root" data-composition-id="main" data-width="640" data-height="360">
+      <p id="portal-copy">Portal copy</p>
+    </div>
+    <img id="portal-image" src="data:image/png;base64,AA==" />
+  `;
+  installGeometry({
+    root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+    "portal-copy": rect({ left: 100, top: 260, width: 180, height: 40 }),
+    "portal-image": rect({ left: 600, top: 80, width: 180, height: 100 }),
+    text: rect({ left: 100, top: 260, width: 180, height: 40 }),
+  });
+  installAuditScript();
+
+  const candidates = runGeometryCandidates({ text: true, media: true, tolerance: 2 });
+
+  expect(candidates.map((candidate) => candidate.selector)).toEqual(
+    expect.arrayContaining(["#boundary", "#portal-copy", "#portal-image"]),
+  );
+});
+
+it("returns unique structural selectors for repeated class-only media", () => {
+  document.body.innerHTML = `
+    <div id="root" data-composition-id="main" data-width="640" data-height="360">
+      <img class="tile" src="data:image/png;base64,AA==" />
+      <img class="tile" src="data:image/png;base64,AA==" />
+    </div>
+  `;
+  installGeometry({
+    root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+    "": rect({ left: 100, top: 100, width: 100, height: 100 }),
+  });
+  installAuditScript();
+
+  const candidates = runGeometryCandidates({ text: false, media: true, tolerance: 2 });
+  const images = Array.from(document.querySelectorAll("img"));
+
+  expect(candidates).toHaveLength(2);
+  expect(new Set(candidates.map((candidate) => candidate.selector)).size).toBe(2);
+  expect(document.querySelector(candidates[0]?.selector ?? "")).toBe(images[0]);
+  expect(document.querySelector(candidates[1]?.selector ?? "")).toBe(images[1]);
+});
+
+it("keeps visible clip-path text when pointer events do not participate in hit testing", () => {
+  document.body.innerHTML = `
+    <div id="root" data-composition-id="main" data-width="640" data-height="360">
+      <p id="clipped-copy">Visible clipped copy</p>
+    </div>
+  `;
+  installGeometry(
+    {
+      root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+      "clipped-copy": rect({ left: 100, top: 100, width: 200, height: 40 }),
+      text: rect({ left: 100, top: 100, width: 200, height: 40 }),
+    },
+    { "clipped-copy": { clipPath: "inset(0 10% 0 0)", pointerEvents: "none" } },
+  );
+  Reflect.set(
+    document,
+    "elementFromPoint",
+    vi.fn(() => document.getElementById("root")),
+  );
+  installAuditScript();
+
+  const candidates = runGeometryCandidates({ text: true, media: false, tolerance: 2 });
+
+  expect(candidates).toEqual(
+    expect.arrayContaining([expect.objectContaining({ selector: "#clipped-copy" })]),
+  );
+});
+
+it("uses the bridge opacity floor across the ancestor chain", () => {
+  document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="faint-parent"><p id="hidden-copy">Hidden copy</p></div>
+        <div id="soft-parent"><p id="visible-copy">Visible copy</p></div>
+        <div id="stacked-parent"><p id="stacked-copy">Stacked opacity copy</p></div>
+      </div>
+    `;
+  installGeometry(
+    {
+      root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+      "faint-parent": rect({ left: 40, top: 40, width: 200, height: 40 }),
+      "hidden-copy": rect({ left: 40, top: 40, width: 200, height: 40 }),
+      "soft-parent": rect({ left: 40, top: 120, width: 200, height: 40 }),
+      "visible-copy": rect({ left: 40, top: 120, width: 200, height: 40 }),
+      "stacked-parent": rect({ left: 40, top: 200, width: 200, height: 40 }),
+      "stacked-copy": rect({ left: 40, top: 200, width: 200, height: 40 }),
+      text: rect({ left: 40, top: 120, width: 200, height: 40 }),
+    },
+    {
+      "faint-parent": { opacity: "0.04" },
+      "soft-parent": { opacity: "0.1" },
+      "stacked-parent": { opacity: "0.2" },
+      "stacked-copy": { opacity: "0.2" },
+    },
+  );
+  installAuditScript();
+
+  const candidates = runGeometryCandidates({ text: true, media: false, tolerance: 2 });
+
+  expect(candidates.some((candidate) => candidate.selector === "#hidden-copy")).toBe(false);
+  expect(candidates.some((candidate) => candidate.selector === "#visible-copy")).toBe(true);
+  expect(candidates.some((candidate) => candidate.selector === "#stacked-copy")).toBe(true);
 });
 
 describe("layout-audit.browser content overlap", () => {
@@ -143,6 +352,7 @@ describe("layout-audit.browser content overlap", () => {
     document.body.innerHTML = "";
     delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
     delete (window as unknown as { __hyperframesLayoutAudit?: unknown }).__hyperframesLayoutAudit;
+    clearGeometryCollector();
   });
 
   it("flags two solid text blocks that overlap", () => {
@@ -404,6 +614,7 @@ describe("layout-audit.browser occlusion", () => {
     document.body.innerHTML = "";
     delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
     delete (window as unknown as { __hyperframesLayoutAudit?: unknown }).__hyperframesLayoutAudit;
+    clearGeometryCollector();
   });
 
   it("flags text painted over by an opaque sibling overlay", () => {
@@ -622,7 +833,10 @@ function runAudit(): Array<{
   return audit({ time: 1, tolerance: 2 });
 }
 
-function installGeometry(rects: Record<string, DOMRect>): void {
+function installGeometry(
+  rects: Record<string, DOMRect>,
+  styleOverrides: Record<string, Partial<CSSStyleDeclaration>> = {},
+): void {
   vi.spyOn(window, "getComputedStyle").mockImplementation((element) => {
     const el = element as Element;
     const isBubble = el.id === "bubble";
@@ -648,6 +862,7 @@ function installGeometry(rects: Record<string, DOMRect>): void {
       paddingBottom: isBubble ? "16px" : "0px",
       paddingLeft: isBubble ? "16px" : "0px",
       fontSize: "36px",
+      ...styleOverrides[el.id],
     } as unknown as CSSStyleDeclaration;
   });
 
@@ -676,6 +891,41 @@ function installGeometry(rects: Record<string, DOMRect>): void {
       detach() {},
     } as unknown as Range;
   });
+}
+
+interface GeometryCandidateResult {
+  kind: "text" | "media";
+  tag: string;
+  text: string;
+  selector: string;
+  sourceFile: string;
+  rect: Record<string, number>;
+  elementRect: Record<string, number>;
+  overflow?: Record<string, number>;
+}
+
+declare global {
+  interface Window {
+    __hyperframesGeometryCandidates?: (options: {
+      text: boolean;
+      media: boolean;
+      tolerance: number;
+    }) => GeometryCandidateResult[];
+  }
+}
+
+function runGeometryCandidates(options: {
+  text: boolean;
+  media: boolean;
+  tolerance: number;
+}): GeometryCandidateResult[] {
+  const collector = window.__hyperframesGeometryCandidates;
+  if (!collector) throw new Error("Geometry collector was not installed");
+  return collector(options);
+}
+
+function clearGeometryCollector(): void {
+  delete window.__hyperframesGeometryCandidates;
 }
 
 function rect({ left, top, width, height }: RectInput): DOMRect {

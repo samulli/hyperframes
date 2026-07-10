@@ -81,6 +81,22 @@
     return `${selectorFor(parent)} > ${element.tagName.toLowerCase()}:nth-of-type(${index})`;
   }
 
+  function uniqueSelectorFor(element) {
+    const preferred = selectorFor(element);
+    try {
+      if (document.querySelectorAll(preferred).length === 1) return preferred;
+    } catch {
+      // Fall through to a structural selector.
+    }
+    const parent = element.parentElement;
+    if (!parent) return preferred;
+    const siblings = Array.from(parent.children).filter(
+      (child) => child.tagName === element.tagName,
+    );
+    const index = siblings.indexOf(element) + 1;
+    return `${uniqueSelectorFor(parent)} > ${element.tagName.toLowerCase()}:nth-of-type(${index})`;
+  }
+
   function hasIgnoreFlag(element) {
     return !!element.closest("[data-layout-ignore], [data-layout-check='ignore']");
   }
@@ -96,6 +112,14 @@
       if (Number.isFinite(parsed)) opacity *= parsed;
     }
     return opacity;
+  }
+
+  function hasOpacityBelow(element, floor) {
+    for (let current = element; current; current = current.parentElement) {
+      const parsed = Number.parseFloat(getComputedStyle(current).opacity || "1");
+      if (Number.isFinite(parsed) && parsed < floor) return true;
+    }
+    return false;
   }
 
   // A clip-path can shrink an element's painted region to nothing (e.g. a
@@ -142,9 +166,20 @@
     return !paintsAnyProbePoint(element, rect);
   }
 
-  function isVisibleElement(element) {
+  function isVisibleElement(element, opacityFloor, probeClipPath) {
     if (IGNORE_TAGS.has(element.tagName)) return false;
     if (hasIgnoreFlag(element)) return false;
+    if (
+      opacityFloor != null &&
+      typeof element.checkVisibility === "function" &&
+      !element.checkVisibility({
+        opacityProperty: true,
+        visibilityProperty: true,
+        contentVisibilityAuto: true,
+      })
+    ) {
+      return false;
+    }
     const style = getComputedStyle(element);
     if (
       style.display === "none" ||
@@ -153,32 +188,57 @@
     ) {
       return false;
     }
-    if (opacityChain(element) < 0.2) return false;
+    if (
+      opacityFloor == null ? opacityChain(element) < 0.2 : hasOpacityBelow(element, opacityFloor)
+    ) {
+      return false;
+    }
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0.5 || rect.height <= 0.5) return false;
-    return !isClippedAway(element);
+    return probeClipPath === false || !isClippedAway(element);
   }
 
-  function textContentFor(element) {
-    return (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+  function directTextNodes(element) {
+    return Array.from(element.childNodes).filter((node) => node.nodeType === 3);
   }
 
-  function hasOwnTextCandidate(element) {
-    const text = textContentFor(element);
+  function textContentFor(element, ownTextOnly) {
+    const content = ownTextOnly
+      ? directTextNodes(element)
+          .map((node) => node.textContent || "")
+          .join("")
+      : element.innerText || element.textContent || "";
+    return content.replace(/\s+/g, " ").trim();
+  }
+
+  function hasOwnTextCandidate(element, directOnly) {
+    const text = textContentFor(element, directOnly);
     if (!text) return false;
+    if (directOnly) return true;
     for (const child of Array.from(element.children)) {
       if (isVisibleElement(child) && textContentFor(child)) return false;
     }
     return true;
   }
 
-  function textRectFor(element) {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    const rects = Array.from(range.getClientRects()).filter(
-      (rect) => rect.width > 0.5 && rect.height > 0.5,
-    );
-    range.detach();
+  function textClientRects(element, directOnly) {
+    const subjects = directOnly ? directTextNodes(element) : [element];
+    const rects = [];
+    for (const subject of subjects) {
+      const range = document.createRange();
+      range.selectNodeContents(subject);
+      rects.push(
+        ...Array.from(range.getClientRects()).filter(
+          (rect) => rect.width > 0.5 && rect.height > 0.5,
+        ),
+      );
+      range.detach();
+    }
+    return rects;
+  }
+
+  function textRectFor(element, directOnly) {
+    const rects = textClientRects(element, directOnly);
     if (rects.length === 0) return null;
 
     const union = rects.reduce(
@@ -602,6 +662,7 @@
   }
 
   const RASTER_TAGS = new Set(["IMG", "VIDEO", "CANVAS"]);
+  const FRAME_MEDIA_TAGS = new Set([...RASTER_TAGS, "SVG"]);
 
   // An element hides text beneath it when it paints opaque pixels at near-full
   // opacity: raster content (img/video/canvas), a background image, or a solid
@@ -703,6 +764,70 @@
     };
   }
 
+  function candidateAnchor(element) {
+    const dataAttributes = {};
+    for (const attribute of Array.from(element.attributes)) {
+      if (attribute.name.startsWith("data-")) dataAttributes[attribute.name] = attribute.value;
+    }
+    const source = element
+      .closest("[data-composition-file]")
+      ?.getAttribute("data-composition-file");
+    return {
+      selector: uniqueSelectorFor(element),
+      dataAttributes,
+      sourceFile: source || "index.html",
+    };
+  }
+
+  function geometryCandidate(element, kind, rect, elementRect, rootRect, tolerance) {
+    const tag = element.tagName.toLowerCase();
+    const text = kind === "text" ? textContentFor(element, true) : tag;
+    const overflow = kind === "media" ? overflowFor(elementRect, rootRect, tolerance) : null;
+    return {
+      kind,
+      tag,
+      text,
+      rect,
+      elementRect,
+      ...candidateAnchor(element),
+      ...(overflow ? { overflow } : {}),
+    };
+  }
+
+  window.__hyperframesGeometryCandidates = function collectGeometryCandidates(options) {
+    const includeText = options?.text === true;
+    const includeMedia = options?.media === true;
+    if (!includeText && !includeMedia) return [];
+    const tolerance = typeof options?.tolerance === "number" ? options.tolerance : 2;
+    const root =
+      document.querySelector("[data-composition-id][data-width][data-height]") ||
+      document.querySelector("[data-composition-id]") ||
+      document.body;
+    const rootRect = rootRectFor(root);
+    const candidates = [];
+    for (const element of Array.from(document.querySelectorAll("body *"))) {
+      if (element.closest('[data-composition-id="captions"], .caption-layer, #caption-stage')) {
+        continue;
+      }
+      if (!isVisibleElement(element, 0.05, false)) continue;
+      const elementRect = toRect(element.getBoundingClientRect());
+      if (includeText && hasOwnTextCandidate(element, true)) {
+        const rect = textRectFor(element, true);
+        if (rect) {
+          candidates.push(
+            geometryCandidate(element, "text", rect, elementRect, rootRect, tolerance),
+          );
+        }
+      }
+      if (includeMedia && FRAME_MEDIA_TAGS.has(element.tagName.toUpperCase())) {
+        candidates.push(
+          geometryCandidate(element, "media", elementRect, elementRect, rootRect, tolerance),
+        );
+      }
+    }
+    return candidates;
+  };
+
   window.__hyperframesLayoutAudit = function auditLayout(options) {
     const time = options && typeof options.time === "number" ? options.time : 0;
     const tolerance =
@@ -712,7 +837,9 @@
       document.querySelector("[data-composition-id]") ||
       document.body;
     const rootRect = rootRectFor(root);
-    const elements = Array.from(root.querySelectorAll("*")).filter(isVisibleElement);
+    const elements = Array.from(root.querySelectorAll("*")).filter((element) =>
+      isVisibleElement(element),
+    );
     const issues = [];
 
     for (const element of elements) {

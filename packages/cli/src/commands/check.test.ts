@@ -20,8 +20,9 @@ import {
   type ContrastAuditEntry,
   type MotionSpecResolution,
 } from "../utils/checkPipeline.js";
+import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import type { ProjectLintResult } from "../utils/lintProject.js";
-import type { LayoutIssue } from "../utils/layoutAudit.js";
+import type { LayoutIssue, LayoutOverflow, LayoutRect } from "../utils/layoutAudit.js";
 import type { ProjectDir } from "../utils/project.js";
 
 const PROJECT: ProjectDir = {
@@ -30,6 +31,12 @@ const PROJECT: ProjectDir = {
   indexPath: "/project/index.html",
 };
 const PNG_BASE64 = Buffer.from("png-bytes").toString("base64");
+const ORIGINAL_EXIT_CODE = process.exitCode;
+
+afterEach(() => {
+  process.exitCode = ORIGINAL_EXIT_CODE;
+  vi.restoreAllMocks();
+});
 
 function cleanLint(): ProjectLintResult {
   return {
@@ -118,6 +125,7 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     findAmbiguousSelectors: vi.fn(async (_selectors: string[]) => []),
     seek: vi.fn(async (_time: number) => undefined),
     collectLayout: vi.fn(async (_time: number, _tolerance: number) => []),
+    collectGeometryCandidates: vi.fn(async () => []),
     collectMotionFrame: vi.fn(async (time: number) => ({ time, data: {}, liveness: {} })),
     anchorMotionIssues: vi.fn(async (issues: LayoutIssue[]) =>
       issues.map((issue) => ({
@@ -128,6 +136,76 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     collectContrast: vi.fn(async (_time: number) => ({ entries: [], pngBase64: PNG_BASE64 })),
     ...overrides,
   };
+}
+
+interface GeometryFixture {
+  kind: "text" | "media";
+  tag: string;
+  text: string;
+  selector: string;
+  rect: LayoutRect;
+  elementRect?: LayoutRect;
+  time: number;
+  overflow?: LayoutOverflow;
+}
+
+function geometryCandidate(fixture: GeometryFixture) {
+  return {
+    ...anchor(fixture.selector, fixture.time),
+    kind: fixture.kind,
+    tag: fixture.tag,
+    text: fixture.text,
+    rect: fixture.rect,
+    elementRect: fixture.elementRect ?? fixture.rect,
+    bbox: {
+      x: fixture.rect.left,
+      y: fixture.rect.top,
+      width: fixture.rect.width,
+      height: fixture.rect.height,
+    },
+    overflow: fixture.overflow,
+  };
+}
+
+function fixtureRect(left: number, top: number, width: number, height: number): LayoutRect {
+  return { left, top, right: left + width, bottom: top + height, width, height };
+}
+
+function checkBrowserSource(): string {
+  return readFileSync(new URL("../utils/checkBrowser.ts", import.meta.url), "utf8");
+}
+
+async function gateCandidates(
+  time: number,
+  request: { text: boolean; media: boolean; tolerance: number },
+) {
+  const candidates = [];
+  if (request.text) {
+    candidates.push(
+      geometryCandidate({
+        kind: "text",
+        tag: "h2",
+        text: "Repeated heading",
+        selector: time === 2 ? "#first-heading" : "#later-heading",
+        rect: fixtureRect(800, 880, 320, 60),
+        time,
+      }),
+    );
+  }
+  if (request.media) {
+    candidates.push(
+      geometryCandidate({
+        kind: "media",
+        tag: "video",
+        text: "video",
+        selector: "#midpoint-video",
+        rect: fixtureRect(-140, 100, 100, 100),
+        overflow: { left: 140 },
+        time,
+      }),
+    );
+  }
+  return candidates;
 }
 
 function noMotion(): MotionSpecResolution {
@@ -198,6 +276,361 @@ describe("contrast sample selection", () => {
     ]);
     expect(selectContrastTimes([1, 2, 3])).toEqual([1, 2, 3]);
   });
+});
+
+it("parses the caption-zone grammar and enables the frame gate", async () => {
+  const { report } = await runScenario(fakeDriver());
+  const runPipeline = vi.fn(async (_project: ProjectDir, _options: CheckOptions) => report);
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const command = createCheckCommand({
+    resolveProject: () => PROJECT,
+    runPipeline,
+    withMeta: (value) => value,
+  });
+
+  await runCommand(command, {
+    rawArgs: [
+      "--json",
+      "--caption-zone",
+      "x0=0;y0=.82;x1=1;y1=1;severity=error;seek=.25,1",
+      "--frame-check",
+    ],
+  });
+
+  expect(runPipeline).toHaveBeenCalledWith(
+    PROJECT,
+    expect.objectContaining({
+      captionZone: {
+        x0: 0,
+        y0: 0.82,
+        x1: 1,
+        y1: 1,
+        severity: "error",
+        seek: [0.25, 1],
+      },
+      frameCheck: {},
+    }),
+  );
+});
+
+it("rejects malformed caption-zone specs instead of silently disabling the gate", async () => {
+  const { report } = await runScenario(fakeDriver());
+  const runPipeline = vi.fn(async () => report);
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const command = createCheckCommand({
+    resolveProject: () => PROJECT,
+    runPipeline,
+    withMeta: (value) => ({ ...value, _meta: { version: "test" } }),
+  });
+
+  await runCommand(command, {
+    rawArgs: ["--json", "--caption-zone", "x0=0;y0=.8;x1=1;y1=1.2"],
+  });
+
+  expect(runPipeline).not.toHaveBeenCalled();
+  expect(process.exitCode).toBe(1);
+  expect(log).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual({
+    ok: false,
+    error: expect.stringContaining("Invalid --caption-zone"),
+    _meta: { version: "test" },
+  });
+});
+
+it("flags only text whose center is inside the caption band at the default end seek", async () => {
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "text",
+      tag: "div",
+      text: "Centered title",
+      selector: "#centered",
+      rect: fixtureRect(860, 870, 200, 60),
+      time,
+    }),
+    geometryCandidate({
+      kind: "text",
+      tag: "div",
+      text: "Overlap only",
+      selector: "#overlap-only",
+      rect: fixtureRect(860, 830, 200, 60),
+      time,
+    }),
+  ]);
+  const { report } = await runScenario(
+    fakeDriver({
+      getDuration: vi.fn(async () => 10),
+      collectGeometryCandidates,
+    }),
+    {
+      samples: 1,
+      contrast: false,
+      captionZone: { x0: 0, y0: 0.8, x1: 1, y1: 0.9 },
+    },
+  );
+
+  expect(collectGeometryCandidates).toHaveBeenCalledTimes(1);
+  expect(collectGeometryCandidates).toHaveBeenCalledWith(10, {
+    text: true,
+    media: false,
+    tolerance: 2,
+  });
+  expect(report.layout.samples).toEqual([5, 10]);
+  expect(report.layout.findings).toEqual([
+    expect.objectContaining({
+      code: "caption_zone_collision",
+      severity: "warning",
+      selector: "#centered",
+      text: "Centered title",
+      time: 10,
+    }),
+  ]);
+  expect(report.ok).toBe(true);
+});
+
+it("filters caption candidates by the element box while centering the text rect", async () => {
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "text",
+      tag: "div",
+      text: "Full-frame wrapper copy",
+      selector: "#full-frame-wrapper",
+      rect: fixtureRect(860, 870, 200, 60),
+      elementRect: fixtureRect(0, 0, 1920, 1080),
+      time,
+    }),
+    geometryCandidate({
+      kind: "text",
+      tag: "span",
+      text: "Tiny wrapper copy",
+      selector: "#tiny-wrapper",
+      rect: fixtureRect(860, 870, 200, 60),
+      elementRect: fixtureRect(860, 870, 3, 3),
+      time,
+    }),
+  ]);
+  const { report } = await runScenario(fakeDriver({ collectGeometryCandidates }), {
+    contrast: false,
+    captionZone: { x0: 0, y0: 0.8, x1: 1, y1: 0.9 },
+  });
+
+  expect(report.layout.findings).toEqual([]);
+});
+
+it("checks media overflow at the default midpoint and applies warning severity", async () => {
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "media",
+      tag: "img",
+      text: "img",
+      selector: "#hero-image",
+      rect: fixtureRect(1840, 100, 220, 200),
+      overflow: { right: 140 },
+      time,
+    }),
+  ]);
+  const { report } = await runScenario(
+    fakeDriver({ getDuration: vi.fn(async () => 10), collectGeometryCandidates }),
+    { samples: 1, contrast: false, frameCheck: {} },
+  );
+
+  expect(collectGeometryCandidates).toHaveBeenCalledWith(5, {
+    text: false,
+    media: true,
+    tolerance: 2,
+  });
+  expect(report.layout.findings[0]).toMatchObject({
+    code: "frame_out_of_frame",
+    severity: "warning",
+    selector: "#hero-image",
+    overflow: { right: 140 },
+    time: 5,
+  });
+});
+
+it("converts progress seeks to time, gates each collector, and keeps the first caption hit", async () => {
+  const collectGeometryCandidates = vi.fn(gateCandidates);
+  const { report } = await runScenario(
+    fakeDriver({
+      getDuration: vi.fn(async () => 8),
+      collectGeometryCandidates,
+    }),
+    {
+      samples: 1,
+      contrast: false,
+      captionZone: {
+        x0: 0,
+        y0: 0.8,
+        x1: 1,
+        y1: 0.9,
+        severity: "error",
+        seek: [0.25, 0.75],
+      },
+      frameCheck: { severity: "error" },
+    },
+  );
+
+  expect(report.layout.samples).toEqual([2, 4, 6]);
+  expect(collectGeometryCandidates.mock.calls).toEqual([
+    [2, { text: true, media: false, tolerance: 2 }],
+    [4, { text: false, media: true, tolerance: 2 }],
+    [6, { text: true, media: false, tolerance: 2 }],
+  ]);
+  expect(report.layout.findings).toEqual([
+    expect.objectContaining({
+      code: "caption_zone_collision",
+      severity: "error",
+      selector: "#first-heading",
+      time: 2,
+    }),
+    expect.objectContaining({ code: "frame_out_of_frame", severity: "error", time: 4 }),
+  ]);
+  expect(report.ok).toBe(false);
+});
+
+it("does not collect or emit opt-in geometry findings when both flags are off", async () => {
+  const collectGeometryCandidates = vi.fn(async () => [
+    geometryCandidate({
+      kind: "media",
+      tag: "video",
+      text: "video",
+      selector: "#video",
+      rect: fixtureRect(1900, 0, 200, 200),
+      overflow: { right: 180 },
+      time: 4.5,
+    }),
+  ]);
+  const { report } = await runScenario(fakeDriver({ collectGeometryCandidates }), {
+    contrast: false,
+  });
+
+  expect(collectGeometryCandidates).not.toHaveBeenCalled();
+  expect(JSON.stringify(report)).not.toContain("caption_zone_collision");
+  expect(JSON.stringify(report)).not.toContain("frame_out_of_frame");
+});
+
+it("computes caption bands from a portrait composition viewport", async () => {
+  const viewport = resolveCompositionViewportFromHtml(
+    '<div data-composition-id="portrait" data-width="1080" data-height="1920"></div>',
+  );
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "text",
+      tag: "p",
+      text: "Portrait caption collision",
+      selector: "#portrait-copy",
+      rect: fixtureRect(480, 1570, 120, 60),
+      time,
+    }),
+  ]);
+  const getCanvas = vi.fn(async () => viewport);
+  const { report } = await runScenario(
+    fakeDriver({
+      getDuration: vi.fn(async () => 4),
+      getCanvas,
+      collectGeometryCandidates,
+    }),
+    {
+      samples: 1,
+      contrast: false,
+      captionZone: { x0: 0.4, y0: 0.8, x1: 0.6, y1: 0.9 },
+    },
+  );
+
+  expect(viewport).toEqual({ width: 1080, height: 1920 });
+  expect(getCanvas).toHaveBeenCalled();
+  expect(report.layout.findings).toEqual([
+    expect.objectContaining({ code: "caption_zone_collision", selector: "#portrait-copy" }),
+  ]);
+});
+
+it("suppresses frame breaches below the per-canvas floor and reports those above it", async () => {
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "media",
+      tag: "canvas",
+      text: "canvas",
+      selector: "#under-floor",
+      rect: fixtureRect(3980, 100, 199, 100),
+      overflow: { right: 179 },
+      time,
+    }),
+    geometryCandidate({
+      kind: "media",
+      tag: "canvas",
+      text: "canvas",
+      selector: "#over-floor",
+      rect: fixtureRect(3980, 300, 201, 100),
+      overflow: { right: 181 },
+      time,
+    }),
+  ]);
+  const { report } = await runScenario(
+    fakeDriver({
+      getCanvas: vi.fn(async () => ({ width: 4000, height: 3000 })),
+      collectGeometryCandidates,
+    }),
+    {
+      contrast: false,
+      frameCheck: {},
+    },
+  );
+
+  expect(report.layout.findings).toEqual([
+    expect.objectContaining({
+      code: "frame_out_of_frame",
+      selector: "#over-floor",
+      overflow: { right: 181 },
+    }),
+  ]);
+});
+
+it("keeps frame findings at distinct rounded positions across requested seeks", async () => {
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "media",
+      tag: "img",
+      text: "img",
+      selector: "#moving-image",
+      rect: fixtureRect(1920, time === 2 ? 100 : 300, 130, 100),
+      overflow: { right: 130 },
+      time,
+    }),
+  ]);
+  const { report } = await runScenario(
+    fakeDriver({
+      getDuration: vi.fn(async () => 8),
+      collectGeometryCandidates,
+    }),
+    {
+      samples: 1,
+      contrast: false,
+      frameCheck: { seek: [0.25, 0.75] },
+    },
+  );
+
+  expect(report.layout.findings).toEqual([
+    expect.objectContaining({ code: "frame_out_of_frame", time: 2 }),
+    expect.objectContaining({ code: "frame_out_of_frame", time: 6 }),
+  ]);
+});
+
+it("keeps contrast and snapshot sampling on the pre-gate layout grid", async () => {
+  const collectContrast = vi.fn(async () => ({ entries: [], pngBase64: PNG_BASE64 }));
+  const { report } = await runScenario(
+    fakeDriver({
+      getDuration: vi.fn(async () => 10),
+      collectContrast,
+    }),
+    {
+      samples: 1,
+      captionZone: { x0: 0, y0: 0.8, x1: 1, y1: 1 },
+    },
+  );
+
+  expect(report.layout.samples).toEqual([5, 10]);
+  expect(report.contrast.samples).toEqual([5]);
+  expect(collectContrast).toHaveBeenCalledTimes(1);
+  expect(collectContrast).toHaveBeenCalledWith(5);
 });
 
 describe("check pipeline", () => {
@@ -403,6 +836,16 @@ describe("check pipeline", () => {
     await expect(runAuditGrid(driver, DEFAULT_CHECK_OPTIONS, noMotion())).rejects.toThrow(
       "Could not determine composition duration — no layout samples run",
     );
+    await expect(
+      runAuditGrid(
+        driver,
+        {
+          ...DEFAULT_CHECK_OPTIONS,
+          captionZone: { x0: 0, y0: 0.8, x1: 1, y1: 1 },
+        },
+        noMotion(),
+      ),
+    ).rejects.toThrow("Could not determine composition duration — no layout samples run");
 
     const { report, browser } = await runScenario(driver);
     expect(browser).toHaveBeenCalledTimes(1);
@@ -415,7 +858,7 @@ describe("check pipeline", () => {
 
 describe("contrast candidate round-trip", () => {
   it("passes the browser script's raw candidates back to finish, never the normalized copies", () => {
-    const source = readFileSync(new URL("../utils/checkBrowser.ts", import.meta.url), "utf8");
+    const source = checkBrowserSource();
 
     // __contrastAuditFinish samples pixels via the page script's own bbox
     // shape ({x, y, w, h}); sending the Node-normalized candidate
@@ -424,5 +867,16 @@ describe("contrast candidate round-trip", () => {
     expect(source).toMatch(/prepared\.map\(\(entry\) => entry\.raw\)/);
     expect(source).toMatch(/raw: unknown;/);
     expect(source).not.toMatch(/prepared\.map\(\(entry\) => entry\.candidate\)/);
+  });
+});
+
+describe("geometry candidate plumbing", () => {
+  it("wires the opt-in browser primitive without round-tripping normalized candidates", () => {
+    const source = checkBrowserSource();
+
+    expect(source).toMatch(/collectGeometryCandidates: \(time, request\) =>/);
+    expect(source).toMatch(/__hyperframesGeometryCandidates/);
+    expect(source).toMatch(/raw\.flatMap\(\(value\) => parseGeometryCandidate\(value, time\)\)/);
+    expect(source).not.toMatch(/resolveAnchors\(page, raw/);
   });
 });

@@ -18,10 +18,12 @@ import type {
   CheckBbox,
   CheckBrowserResult,
   CheckFinding,
+  CheckGeometryCandidate,
   CheckOptions,
   CheckSeverity,
   ContrastAuditEntry,
   ContrastCapture,
+  GeometryCandidateRequest,
   MotionSpecResolution,
   RunAuditGrid,
 } from "./checkTypes.js";
@@ -193,6 +195,7 @@ function createPageDriver(page: Page, setTime: (time: number) => void): CheckAud
       await seekCompositionTimeline(page, time, SEEK_OPTIONS);
     },
     collectLayout: (time, tolerance) => collectLayout(page, time, tolerance),
+    collectGeometryCandidates: (time, request) => collectGeometryCandidates(page, time, request),
     collectMotionFrame: (time, selectors, scopes) =>
       collectMotionFrame(page, time, selectors, scopes),
     anchorMotionIssues: (issues) => anchorLayoutIssues(page, issues),
@@ -302,6 +305,24 @@ async function collectLayout(
     { time, tolerance },
   );
   return anchorLayoutIssues(page, raw.flatMap(parseLayoutIssue));
+}
+
+async function collectGeometryCandidates(
+  page: Page,
+  time: number,
+  request: GeometryCandidateRequest,
+): Promise<CheckGeometryCandidate[]> {
+  try {
+    const raw = await page.evaluate((options: GeometryCandidateRequest) => {
+      const collect = Reflect.get(window, "__hyperframesGeometryCandidates");
+      if (typeof collect !== "function") return [];
+      const result = Reflect.apply(collect, window, [options]);
+      return Array.isArray(result) ? result : [];
+    }, request);
+    return raw.flatMap((value) => parseGeometryCandidate(value, time));
+  } catch {
+    return [];
+  }
 }
 
 async function findAmbiguousSelectors(
@@ -590,6 +611,54 @@ function parseLayoutIssue(value: unknown): LayoutIssue[] {
   return [issue];
 }
 
+function parseGeometryCandidate(value: unknown, time: number): CheckGeometryCandidate[] {
+  if (!isRecord(value)) return [];
+  const rect = parseRect(Reflect.get(value, "rect"));
+  const elementRect = parseRect(Reflect.get(value, "elementRect"));
+  if (!rect || !elementRect) return [];
+  const identity = parseGeometryIdentity(value);
+  if (!identity) return [];
+  const anchor = parseGeometryAnchor(value, rect, time);
+  if (!anchor) return [];
+  const candidate: CheckGeometryCandidate = { ...identity, ...anchor, rect, elementRect };
+  const overflow = parseOverflow(Reflect.get(value, "overflow"));
+  if (overflow) candidate.overflow = overflow;
+  return [candidate];
+}
+
+function parseGeometryIdentity(
+  value: Record<string, unknown>,
+): Pick<CheckGeometryCandidate, "kind" | "tag" | "text"> | null {
+  const kindValue = Reflect.get(value, "kind");
+  const kind = kindValue === "text" || kindValue === "media" ? kindValue : null;
+  if (!kind) return null;
+  const tag = stringValue(value, "tag");
+  if (!tag) return null;
+  const text = stringValue(value, "text");
+  return text === null ? null : { kind, tag, text };
+}
+
+function parseGeometryAnchor(
+  value: Record<string, unknown>,
+  rect: LayoutRect,
+  time: number,
+): CheckAnchor | null {
+  const selector = stringValue(value, "selector");
+  if (!selector) return null;
+  const sourceFile = stringValue(value, "sourceFile");
+  if (!sourceFile) return null;
+  const dataAttributes = stringRecord(Reflect.get(value, "dataAttributes"));
+  return dataAttributes
+    ? {
+        selector,
+        sourceFile,
+        dataAttributes,
+        bbox: rectToBbox(rect),
+        time,
+      }
+    : null;
+}
+
 function assignOptionalLayoutFields(issue: LayoutIssue, value: Record<string, unknown>): void {
   assignOptionalString(issue, value, "containerSelector");
   assignOptionalString(issue, value, "text");
@@ -721,6 +790,8 @@ const LAYOUT_ISSUE_CODES: readonly LayoutIssueCode[] = [
   "container_overflow",
   "content_overlap",
   "text_occluded",
+  "caption_zone_collision",
+  "frame_out_of_frame",
   "motion_appears_late",
   "motion_out_of_order",
   "motion_off_frame",

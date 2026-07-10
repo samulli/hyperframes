@@ -12,7 +12,12 @@ import {
   type LayoutIssue,
   type LayoutRect,
 } from "./layoutAudit.js";
-import { collectSamplingTargets, evaluateMotion, type MotionFrame } from "./motionAudit.js";
+import {
+  collectSamplingTargets,
+  evaluateMotion,
+  type Canvas,
+  type MotionFrame,
+} from "./motionAudit.js";
 import { findMotionSpec, readMotionSpec } from "./motionSpec.js";
 import { normalizeErrorMessage } from "./errorMessage.js";
 import {
@@ -29,12 +34,14 @@ import type {
   CheckContrastFinding,
   CheckDependencies,
   CheckFinding,
+  CheckGeometryCandidate,
   CheckOptions,
   CheckReport,
   CheckScreenshot,
   CheckSection,
   CheckSeverity,
   ContrastAuditEntry,
+  GeometryCandidateRequest,
   MotionSpecResolution,
 } from "./checkTypes.js";
 
@@ -55,6 +62,9 @@ export type {
 const MOTION_FPS = 20;
 const MOTION_MAX_SAMPLES = 300;
 const ZERO_BBOX: CheckBbox = { x: 0, y: 0, width: 0, height: 0 };
+// Ignore normal in/out slide travel; only substantive frame breaches are actionable.
+const FRAME_BREACH_FLOOR_PX = 120;
+const FRAME_BREACH_FLOOR_FRACTION = 0.06;
 
 export const DEFAULT_CHECK_OPTIONS: CheckOptions = {
   samples: 9,
@@ -87,9 +97,21 @@ function buildMotionSampleTimes(duration: number): number[] {
 interface SampleGrid {
   duration: number;
   layoutSamples: number[];
+  captionSamples: number[];
+  frameSamples: number[];
   transitionSamples: number[];
   transitionSamplesDropped: number;
   contrastSamples: number[];
+}
+
+function gateSampleTimes(
+  duration: number,
+  seeks: number[] | undefined,
+  fallback: number,
+): number[] {
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+  const fractions = seeks && seeks.length > 0 ? seeks : [fallback];
+  return mergeSampleTimes(fractions.map((fraction) => fraction * duration));
 }
 
 async function buildSampleGrid(
@@ -109,16 +131,25 @@ async function buildSampleGrid(
         cap: options.maxTransitionSamples,
       })
     : { times: [], dropped: 0 };
-  const layoutSamples = mergeSampleTimes(baseSamples, transitions.times);
+  const captionSamples = options.captionZone
+    ? gateSampleTimes(duration, options.captionZone.seek, 1)
+    : [];
+  const frameSamples = options.frameCheck
+    ? gateSampleTimes(duration, options.frameCheck.seek, 0.5)
+    : [];
+  const auditSamples = mergeSampleTimes(baseSamples, transitions.times);
+  const layoutSamples = mergeSampleTimes(auditSamples, captionSamples, frameSamples);
   if (layoutSamples.length === 0) {
     throw new Error("Could not determine composition duration — no layout samples run");
   }
   return {
     duration,
     layoutSamples,
+    captionSamples,
+    frameSamples,
     transitionSamples: transitions.times,
     transitionSamplesDropped: transitions.dropped,
-    contrastSamples: options.contrast ? selectContrastTimes(layoutSamples) : [],
+    contrastSamples: options.contrast ? selectContrastTimes(auditSamples) : [],
   };
 }
 
@@ -151,6 +182,156 @@ interface GridSamples {
   screenshots: CheckScreenshot[];
 }
 
+interface GeometrySeen {
+  caption: Set<string>;
+  frame: Set<string>;
+}
+
+function geometryRequest(
+  time: number,
+  grid: SampleGrid,
+  options: CheckOptions,
+): GeometryCandidateRequest | null {
+  const text = grid.captionSamples.includes(time);
+  const media = grid.frameSamples.includes(time);
+  if (!text && !media) return null;
+  const configuredTolerance = options.frameCheck?.tol;
+  const tolerance = typeof configuredTolerance === "number" ? configuredTolerance : 2;
+  return { text, media, tolerance };
+}
+
+function candidateIsSized(candidate: CheckGeometryCandidate, canvas: Canvas): boolean {
+  if (candidate.elementRect.width < 4 || candidate.elementRect.height < 4) return false;
+  return !(
+    candidate.elementRect.width >= 0.95 * canvas.width &&
+    candidate.elementRect.height >= 0.95 * canvas.height
+  );
+}
+
+function geometryIssueAnchor(candidate: CheckGeometryCandidate, time: number) {
+  return {
+    selector: candidate.selector,
+    dataAttributes: candidate.dataAttributes,
+    sourceFile: candidate.sourceFile,
+    bbox: candidate.bbox,
+    time,
+    rect: candidate.rect,
+  };
+}
+
+function captionFinding(
+  candidate: CheckGeometryCandidate,
+  options: CheckOptions,
+  canvas: Canvas,
+  time: number,
+): { key: string; issue: AnchoredLayoutIssue } | null {
+  const zone = options.captionZone;
+  if (!zone || candidate.kind !== "text" || !candidateIsSized(candidate, canvas)) return null;
+  const cx = candidate.rect.left + candidate.rect.width / 2;
+  const cy = candidate.rect.top + candidate.rect.height / 2;
+  const inside =
+    cx >= zone.x0 * canvas.width &&
+    cx <= zone.x1 * canvas.width &&
+    cy >= zone.y0 * canvas.height &&
+    cy <= zone.y1 * canvas.height;
+  if (!inside) return null;
+  const text = candidate.text.slice(0, 48);
+  const pctFromBottom = Math.round(((canvas.height - cy) / canvas.height) * 100);
+  return {
+    key: `${candidate.tag}|${text}`,
+    issue: {
+      ...geometryIssueAnchor(candidate, time),
+      code: "caption_zone_collision",
+      severity: zone.severity === "error" ? "error" : "warning",
+      text,
+      message: `<${candidate.tag}> "${text}" is centred in the reserved caption band (~${pctFromBottom}% up from the bottom).`,
+      fixHint: "Keep main content outside the configured caption band.",
+    },
+  };
+}
+
+function maxOverflow(candidate: CheckGeometryCandidate): number {
+  if (!candidate.overflow) return 0;
+  return Math.max(
+    candidate.overflow.left ?? 0,
+    candidate.overflow.top ?? 0,
+    candidate.overflow.right ?? 0,
+    candidate.overflow.bottom ?? 0,
+  );
+}
+
+function overflowMessage(candidate: CheckGeometryCandidate): string {
+  const overflow = candidate.overflow ?? {};
+  const edges: string[] = [];
+  if (overflow.left) edges.push(`${overflow.left}px past the left`);
+  if (overflow.top) edges.push(`${overflow.top}px past the top`);
+  if (overflow.right) edges.push(`${overflow.right}px past the right`);
+  if (overflow.bottom) edges.push(`${overflow.bottom}px past the bottom`);
+  return `<${candidate.tag}> "${candidate.text.slice(0, 48)}" spills outside the frame (${edges.join(", ")}).`;
+}
+
+function frameFinding(
+  candidate: CheckGeometryCandidate,
+  options: CheckOptions,
+  canvas: Canvas,
+  time: number,
+): { key: string; issue: AnchoredLayoutIssue } | null {
+  if (!options.frameCheck || candidate.kind !== "media" || !candidateIsSized(candidate, canvas)) {
+    return null;
+  }
+  const floor = Math.max(
+    FRAME_BREACH_FLOOR_PX,
+    FRAME_BREACH_FLOOR_FRACTION * Math.min(canvas.width, canvas.height),
+  );
+  if (maxOverflow(candidate) < floor) return null;
+  const text = candidate.text.slice(0, 48);
+  return {
+    key: `${candidate.tag}|${text}|${Math.round(candidate.rect.left)},${Math.round(candidate.rect.top)}`,
+    issue: {
+      ...geometryIssueAnchor(candidate, time),
+      code: "frame_out_of_frame",
+      severity: options.frameCheck.severity === "error" ? "error" : "warning",
+      text,
+      overflow: candidate.overflow,
+      message: overflowMessage(candidate),
+      fixHint: "Keep media within the composition frame's safe area.",
+    },
+  };
+}
+
+function appendGeometryFinding(
+  result: { key: string; issue: AnchoredLayoutIssue } | null,
+  seen: Set<string>,
+  issues: AnchoredLayoutIssue[],
+): void {
+  if (!result || seen.has(result.key)) return;
+  seen.add(result.key);
+  issues.push(result.issue);
+}
+
+async function collectGeometryAt(
+  driver: CheckAuditDriver,
+  options: CheckOptions,
+  grid: SampleGrid,
+  canvas: Canvas,
+  time: number,
+  seen: GeometrySeen,
+): Promise<AnchoredLayoutIssue[]> {
+  const request = geometryRequest(time, grid, options);
+  if (!request) return [];
+  const candidates = await driver.collectGeometryCandidates(time, request);
+  const issues: AnchoredLayoutIssue[] = [];
+  for (const candidate of candidates) {
+    if (request.text) {
+      appendGeometryFinding(captionFinding(candidate, options, canvas, time), seen.caption, issues);
+    }
+    if (request.media) {
+      appendGeometryFinding(frameFinding(candidate, options, canvas, time), seen.frame, issues);
+    }
+  }
+  return issues;
+}
+
 async function collectGridSamples(
   driver: CheckAuditDriver,
   options: CheckOptions,
@@ -160,6 +341,9 @@ async function collectGridSamples(
   const layoutSet = new Set(grid.layoutSamples);
   const motionSet = new Set(motion.times);
   const contrastSet = new Set(grid.contrastSamples);
+  const geometryEnabled = grid.captionSamples.length > 0 || grid.frameSamples.length > 0;
+  const canvas = geometryEnabled ? await driver.getCanvas() : null;
+  const geometrySeen: GeometrySeen = { caption: new Set(), frame: new Set() };
   const collected: GridSamples = {
     layoutIssues: [],
     motionFrames: [],
@@ -170,6 +354,11 @@ async function collectGridSamples(
     await driver.seek(time);
     if (layoutSet.has(time)) {
       collected.layoutIssues.push(...(await driver.collectLayout(time, options.tolerance)));
+    }
+    if (canvas) {
+      collected.layoutIssues.push(
+        ...(await collectGeometryAt(driver, options, grid, canvas, time, geometrySeen)),
+      );
     }
     if (motionSet.has(time)) {
       collected.motionFrames.push(

@@ -16,6 +16,8 @@ export type LayoutIssueCode =
   | "container_overflow"
   | "content_overlap"
   | "text_occluded"
+  | "caption_zone_collision"
+  | "frame_out_of_frame"
   // Motion-verification findings (#1437) — evaluated against the seeked timeline.
   | "motion_appears_late"
   | "motion_out_of_order"
@@ -152,6 +154,7 @@ export function dedupeLayoutIssues(issues: LayoutIssue[]): LayoutIssue[] {
       issue.containerSelector ?? "",
       issue.text ?? "",
       issue.overflow ? formatOverflow(issue.overflow) : "",
+      framePositionKey(issue),
     ].join("|");
     if (seen.has(key)) continue;
     seen.add(key);
@@ -230,7 +233,14 @@ function staticIssueKey(issue: LayoutIssue): string {
     issue.containerSelector ?? "",
     issue.text ?? "",
     issue.overflow ? formatOverflow(issue.overflow) : "",
+    framePositionKey(issue),
   ].join("|");
+}
+
+function framePositionKey(issue: LayoutIssue): string {
+  return issue.code === "frame_out_of_frame"
+    ? `${Math.round(issue.rect.left)},${Math.round(issue.rect.top)}`
+    : "";
 }
 
 function uniqueSortedTimes(times: number[]): number[] {

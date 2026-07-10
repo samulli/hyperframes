@@ -1,5 +1,5 @@
 import type { ProjectLintResult } from "./lintProject.js";
-import type { LayoutIssue } from "./layoutAudit.js";
+import type { LayoutIssue, LayoutOverflow, LayoutRect } from "./layoutAudit.js";
 import type { Canvas, MotionFrame } from "./motionAudit.js";
 import type { MotionSpec } from "./motionSpec.js";
 import type { ProjectDir } from "./project.js";
@@ -16,6 +16,23 @@ export interface CheckOptions {
   contrast: boolean;
   strict: boolean;
   snapshots: boolean;
+  captionZone?: CaptionZoneOptions;
+  frameCheck?: FrameCheckOptions;
+}
+
+export interface CaptionZoneOptions {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  severity?: "error" | "warning";
+  seek?: number[];
+}
+
+export interface FrameCheckOptions {
+  tol?: number;
+  severity?: "error" | "warning";
+  seek?: number[];
 }
 
 export type CheckSeverity = "error" | "warning" | "info";
@@ -70,6 +87,21 @@ export interface ContrastCapture {
   pngBase64: string;
 }
 
+export interface GeometryCandidateRequest {
+  text: boolean;
+  media: boolean;
+  tolerance: number;
+}
+
+export interface CheckGeometryCandidate extends CheckAnchor {
+  kind: "text" | "media";
+  tag: string;
+  text: string;
+  rect: LayoutRect;
+  elementRect: LayoutRect;
+  overflow?: LayoutOverflow;
+}
+
 export type MotionSpecResolution =
   | { kind: "none" }
   | { kind: "valid"; path: string; spec: MotionSpec }
@@ -83,6 +115,10 @@ export interface CheckAuditDriver {
   findAmbiguousSelectors(selectors: string[]): Promise<AnchoredLayoutIssue[]>;
   seek(time: number): Promise<void>;
   collectLayout(time: number, tolerance: number): Promise<AnchoredLayoutIssue[]>;
+  collectGeometryCandidates(
+    time: number,
+    request: GeometryCandidateRequest,
+  ): Promise<CheckGeometryCandidate[]>;
   collectMotionFrame(
     time: number,
     selectors: string[],

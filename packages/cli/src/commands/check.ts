@@ -15,6 +15,7 @@ import {
   type CheckReport,
   type CheckSection,
 } from "../utils/checkPipeline.js";
+import type { CaptionZoneOptions } from "../utils/checkTypes.js";
 
 export const examples: Example[] = [
   ["Run the full verification gate", "hyperframes check"],
@@ -102,16 +103,27 @@ export function createCheckCommand(
         description: "Save the five contrast-pass PNGs under snapshots/",
         default: false,
       },
+      "caption-zone": {
+        type: "string",
+        description:
+          'Caption band "x0=0;y0=.82;x1=1;y1=1[;severity=warning|error][;seek=.5,1]" (fractions 0-1; defaults: warning, seek=1)',
+      },
+      "frame-check": {
+        type: "boolean",
+        description:
+          "Use as --frame-check (boolean/no value; tol=2px, severity=warning, seek=.5; breach floor=max(120px, 6% of shorter canvas edge))",
+        default: false,
+      },
     },
     async run({ args }) {
-      const project = dependencies.resolveProject(args.dir);
-      const options = parseCheckOptions(args);
       const asJson = args.json === true;
-      if (!asJson) {
-        console.log(`${c.accent("◆")}  Checking ${c.accent(project.name)}`);
-      }
 
       try {
+        const project = dependencies.resolveProject(args.dir);
+        const options = parseCheckOptions(args);
+        if (!asJson) {
+          console.log(`${c.accent("◆")}  Checking ${c.accent(project.name)}`);
+        }
         const report = await dependencies.runPipeline(project, options);
         if (asJson) {
           console.log(JSON.stringify(dependencies.withMeta(report), null, 2));
@@ -151,7 +163,97 @@ function parseCheckOptions(args: Record<string, unknown>): CheckOptions {
     contrast: args.contrast !== false,
     strict: args.strict === true,
     snapshots: args.snapshots === true,
+    captionZone: parseCaptionZone(args["caption-zone"]),
+    frameCheck: args["frame-check"] === true ? {} : undefined,
   };
+}
+
+const CAPTION_ZONE_FIELDS = new Set(["x0", "y0", "x1", "y1", "severity", "seek"]);
+
+function parseCaptionZone(value: unknown): CaptionZoneOptions | undefined {
+  if (value === undefined || value === null) return undefined;
+  const fields = parseCaptionFields(captionZoneString(value));
+  const { x0, y0, x1, y1 } = parseCaptionBounds(fields);
+  const severity = captionSeverity(fields.get("severity"));
+  const seek = captionSeeks(fields.get("seek"));
+  return {
+    x0,
+    y0,
+    x1,
+    y1,
+    ...(severity ? { severity } : {}),
+    ...(seek ? { seek } : {}),
+  };
+}
+
+function captionZoneString(value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") throw captionZoneError();
+  return value;
+}
+
+function parseCaptionFields(value: string): Map<string, string> {
+  const fields = new Map<string, string>();
+  for (const part of value.split(";")) {
+    const { key, entry } = parseCaptionField(part);
+    if (!CAPTION_ZONE_FIELDS.has(key) || fields.has(key)) throw captionZoneError();
+    fields.set(key, entry);
+  }
+  return fields;
+}
+
+function parseCaptionField(part: string): { key: string; entry: string } {
+  const separator = part.indexOf("=");
+  if (separator <= 0) throw captionZoneError();
+  return {
+    key: part.slice(0, separator).trim(),
+    entry: part.slice(separator + 1).trim(),
+  };
+}
+
+function parseCaptionBounds(fields: Map<string, string>): {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+} {
+  const x0 = requiredCaptionFraction(fields, "x0");
+  const y0 = requiredCaptionFraction(fields, "y0");
+  const x1 = requiredCaptionFraction(fields, "x1");
+  const y1 = requiredCaptionFraction(fields, "y1");
+  if (x0 > x1 || y0 > y1) throw captionZoneError();
+  return { x0, y0, x1, y1 };
+}
+
+function requiredCaptionFraction(fields: Map<string, string>, key: string): number {
+  const value = captionFraction(fields.get(key));
+  if (value === null) throw captionZoneError();
+  return value;
+}
+
+function captionFraction(value: string | undefined): number | null {
+  if (value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null;
+}
+
+function captionSeverity(value: string | undefined): "error" | "warning" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "error" || value === "warning") return value;
+  throw captionZoneError();
+}
+
+function captionSeeks(value: string | undefined): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "") return [];
+  const values = value.split(",").map(captionFraction);
+  if (values.some((entry) => entry === null)) throw captionZoneError();
+  return values.flatMap((entry) => (entry === null ? [] : entry));
+}
+
+function captionZoneError(): Error {
+  return new Error(
+    'Invalid --caption-zone; use "x0=0;y0=.82;x1=1;y1=1[;severity=warning|error][;seek=.5,1]" with fractions from 0 to 1.',
+  );
 }
 
 function positiveInteger(value: unknown, fallback: number): number {
