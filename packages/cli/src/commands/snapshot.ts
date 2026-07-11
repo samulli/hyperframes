@@ -320,8 +320,13 @@ async function captureSnapshots(
         syncVideoFrameVisibility = engine.syncVideoFrameVisibility;
         extractMediaMetadata = engine.extractMediaMetadata;
       } catch {
-        // Engine unavailable in this install — snapshot will still run, and
-        // compositions without <video data-start> get exactly the old behaviour.
+        // Engine unavailable in this install — snapshot still runs, but any
+        // <video data-start> will screenshot black (chrome-headless ignores
+        // programmatic currentTime writes). Say so instead of silently
+        // shipping black frames (two wild Windows reports).
+        console.warn(
+          `   ${c.warn("⚠")} @hyperframes/engine unavailable — <video> elements will appear black in snapshots. Verify media via a draft render's extracted frames instead.`,
+        );
       }
       const alphaDecoderCache = new Map<string, Promise<boolean>>();
       const shouldUseVp9AlphaDecoder = (filePath: string): Promise<boolean> => {
@@ -426,6 +431,13 @@ async function captureSnapshots(
             });
           }
 
+          if (active.length > 0 && updates.length < active.length) {
+            const missed = active.length - updates.length;
+            console.warn(
+              `   ${c.warn("⚠")} ${missed}/${active.length} active <video> frame(s) could not be extracted at ${time.toFixed(1)}s — those videos will appear black/stale in this snapshot`,
+            );
+          }
+
           // Sync visibility even when empty — clears stale overlays from prior seeks
           try {
             if (updates.length > 0) {
@@ -436,7 +448,9 @@ async function captureSnapshots(
               active.map((a) => a.id),
             );
           } catch {
-            /* fall through to plain screenshot */
+            console.warn(
+              `   ${c.warn("⚠")} video frame injection failed at ${time.toFixed(1)}s — <video> elements will appear black/stale in this snapshot`,
+            );
           }
         }
 
