@@ -803,9 +803,10 @@
   // overrides `color` for the glyph fill AND inherits, so a parent's
   // `transparent` fill silently blanks descendant text that has its own opaque
   // `color`. Its computed value already resolves to `color` when unset, so it
-  // is the effective fill directly. Gradient/clipped text (`background-clip:
-  // text`) legitimately uses a transparent fill — the clipped background paints
-  // the glyphs — so exclude it.
+  // is the effective fill directly. Clipped text (`background-clip: text`)
+  // legitimately uses a transparent fill — BUT only when a background actually
+  // paints the glyphs; a `background-clip: text` with no gradient/image and no
+  // opaque background-color paints nothing, so it stays reportable.
   function invisibleTextIssue(element, time) {
     const textRect = textRectFor(element);
     if (!textRect) return null;
@@ -818,7 +819,14 @@
     const fill = cs.webkitTextFillColor || cs.color;
     if (colorAlpha(fill) > 0.05) return null;
     const clip = cs.webkitBackgroundClip || cs.backgroundClip || "";
-    if (/text/i.test(clip)) return null;
+    if (/text/i.test(clip)) {
+      const bgImage = cs.backgroundImage || "none";
+      const paintsGlyphs =
+        bgImage !== "none" || colorAlpha(cs.backgroundColor || "rgba(0, 0, 0, 0)") > 0.05;
+      // A usable clipped background fills the glyphs — legitimate gradient/solid
+      // clipped text. If nothing paints, fall through and report it.
+      if (paintsGlyphs) return null;
+    }
     return {
       code: "text_not_painted",
       severity: "error",
