@@ -312,6 +312,7 @@ export function FlatColorGradingSection({
         <span className="text-[11px] text-panel-text-2">Preset</span>
         <FlatSelectRow
           label=""
+          ariaLabel="Preset"
           value={grading.preset ?? "neutral"}
           options={PRESET_OPTIONS}
           tier={resolveValueTier(

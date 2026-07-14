@@ -300,6 +300,11 @@ export function FlatSlider({
   // different control in between.
   const onCommitRef = useRef(onCommit);
   onCommitRef.current = onCommit;
+  // Always this render's committed value — read directly (not via the
+  // effect below) by onLostPointerCapture, so the resync there doesn't
+  // depend on ordering between the native event and the [value] effect.
+  const latestValueRef = useRef(value);
+  latestValueRef.current = value;
 
   useEffect(() => {
     if (draggingRef.current) return;
@@ -407,10 +412,16 @@ export function FlatSlider({
         onLostPointerCapture={() => {
           // Capture can be lost without either pointerup or pointercancel
           // firing first (e.g. another element steals it, or the browser
-          // reclaims it for a scroll/touch gesture) — without this,
-          // draggingRef stays stuck true and the knob permanently stops
-          // syncing to the committed value prop.
+          // reclaims it for a scroll/touch gesture). Resync immediately and
+          // directly from latestValueRef, rather than only clearing
+          // draggingRef and waiting for the [value] effect to notice —
+          // that effect depends on `value` actually changing again to
+          // re-run, so if this event and any concurrent value update are
+          // ordered unfavorably, the knob could otherwise stay stuck at
+          // its mid-drag position indefinitely.
           draggingRef.current = false;
+          setDraft(latestValueRef.current);
+          lastCommittedRef.current = latestValueRef.current;
         }}
         onKeyDown={(e) => {
           if (disabled) return;
@@ -478,6 +489,7 @@ export function FlatSlider({
 
 export function FlatSelectRow({
   label,
+  ariaLabel,
   value,
   options,
   tier,
@@ -486,6 +498,11 @@ export function FlatSelectRow({
   onReset,
 }: {
   label: string;
+  /** Accessible name when a caller renders the visible label OUTSIDE this
+   *  row (label="" to avoid a duplicate) — e.g. Grade's "Preset" row, which
+   *  shows its own label span and would otherwise leave the <select>
+   *  unnamed. Falls back to `label` when omitted. */
+  ariaLabel?: string;
   value: string;
   options: Array<string | { value: string; label: string }>;
   tier: PropertyValueTier;
@@ -515,7 +532,7 @@ export function FlatSelectRow({
           <select
             value={value}
             disabled={disabled}
-            aria-label={label || undefined}
+            aria-label={ariaLabel || label || undefined}
             onChange={(e) => onChange(e.target.value)}
             className={`appearance-none bg-transparent text-right font-mono text-[11px] outline-none disabled:cursor-not-allowed ${VALUE_TIER_VALUE_CLASS[tier]}`}
           >
@@ -548,52 +565,6 @@ export function FlatSelectRow({
           </button>
         )}
       </span>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  FlatToggle — 24×14 pill switch                                     */
-/* ------------------------------------------------------------------ */
-
-export function FlatToggle({
-  label,
-  checked,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  disabled?: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <div className="flex min-h-[30px] items-center justify-between">
-      <span
-        data-flat-toggle-label="true"
-        className={`text-[11px] ${checked ? "text-panel-text-2" : "text-panel-text-3"}`}
-      >
-        {label}
-      </span>
-      <button
-        type="button"
-        data-flat-toggle="true"
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        disabled={disabled}
-        onClick={() => onChange(!checked)}
-        className={`relative h-[14px] w-6 flex-shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-          checked ? "bg-panel-accent/35" : "bg-panel-hover"
-        }`}
-      >
-        <span
-          data-flat-toggle-knob="true"
-          className={`absolute top-0.5 h-2.5 w-2.5 rounded-full transition-all ${
-            checked ? "right-0.5 bg-panel-accent" : "left-0.5 bg-panel-text-4"
-          }`}
-        />
-      </button>
     </div>
   );
 }

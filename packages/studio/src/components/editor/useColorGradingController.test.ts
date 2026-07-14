@@ -13,6 +13,12 @@ function freshPopGrading() {
   return next;
 }
 
+function naturalLiftGrading() {
+  const next = normalizeHfColorGrading({ preset: "natural-lift", intensity: 1 });
+  if (!next) throw new Error("expected natural-lift preset to normalize");
+  return next;
+}
+
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 afterEach(() => {
@@ -227,6 +233,66 @@ describe("useColorGradingController", () => {
     // s3-bg's state must be untouched by a result that belongs to s1-bg.
     expect(getState().grading.preset).toBe("neutral");
     expect(getState().runtimeStatus.state).not.toBe("unavailable");
+    act(() => root.unmount());
+    vi.useRealTimers();
+  });
+
+  it("a stale in-flight persist for edit A does not clobber edit B's state — SAME element, no selection change", async () => {
+    vi.useFakeTimers();
+    let resolveA: (() => void) | undefined;
+    let capturedOnSettledA: ((ok: boolean) => void) | undefined;
+    const onSetAttributeLive = vi
+      .fn()
+      // Edit A (fresh-pop): captures its onSettled and never resolves until
+      // resolveA() is called below — simulates a slow persist.
+      .mockImplementationOnce(
+        (_attr: string, _value: string | null, onSettled?: (ok: boolean) => void) => {
+          capturedOnSettledA = onSettled;
+          return new Promise<void>((resolve) => {
+            resolveA = resolve;
+          });
+        },
+      )
+      // Edit B (natural-lift): settles immediately and successfully.
+      .mockImplementationOnce(
+        (_attr: string, _value: string | null, onSettled?: (ok: boolean) => void) => {
+          onSettled?.(true);
+          return Promise.resolve();
+        },
+      );
+    const { root, getState } = renderHook(onSetAttributeLive);
+
+    act(() => {
+      getState().commitColorGrading(freshPopGrading());
+    });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(onSetAttributeLive).toHaveBeenCalledTimes(1); // A's persist now in flight
+
+    // B commits on the SAME element before A's persist has settled.
+    act(() => {
+      getState().commitColorGrading(naturalLiftGrading());
+    });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(onSetAttributeLive).toHaveBeenCalledTimes(2); // B's persist has already settled (mock resolves sync)
+    expect(getState().grading.preset).toBe("natural-lift");
+
+    // NOW A's stale persist finally settles as a FAILURE — must not revert
+    // `grading` (which now correctly shows B's newer edit) back to the
+    // pre-A baseline ("neutral"), and must not stamp confirmedGradingRef
+    // with A's now-superseded attempt on success either.
+    act(() => {
+      capturedOnSettledA?.(false);
+      resolveA?.();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getState().grading.preset).toBe("natural-lift");
     act(() => root.unmount());
     vi.useRealTimers();
   });

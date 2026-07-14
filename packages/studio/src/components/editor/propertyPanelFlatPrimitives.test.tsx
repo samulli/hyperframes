@@ -9,7 +9,6 @@ import {
   FlatSegmentedRow,
   FlatSelectRow,
   FlatSlider,
-  FlatToggle,
 } from "./propertyPanelFlatPrimitives";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -822,6 +821,55 @@ describe("FlatSlider — Grade extensions", () => {
     expect(track.getAttribute("aria-valuenow")).toBe("99");
     act(() => root.unmount());
   });
+
+  it("resyncs immediately from the latest value on lostpointercapture, even when the value changed WHILE still dragging", () => {
+    const { host, root } = renderInto(
+      <FlatSlider
+        label="Opacity"
+        value={10}
+        min={0}
+        max={100}
+        tier="explicitCustom"
+        displayValue="10%"
+        onCommit={vi.fn()}
+      />,
+    );
+    const track = host.querySelector<HTMLElement>('[data-flat-slider-track="true"]');
+    if (!track) throw new Error("expected a track element");
+    Object.defineProperty(track, "getBoundingClientRect", {
+      value: () => ({ left: 0, width: 100, top: 0, height: 20, right: 100, bottom: 20 }),
+    });
+    act(() => {
+      track.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, clientX: 30, pointerId: 1 }),
+      );
+    });
+    expect(track.getAttribute("aria-valuenow")).toBe("30");
+    // Value changes to 99 WHILE still dragging — the [value] sync effect
+    // must skip it (draggingRef is still true), so draft stays at 30.
+    act(() => {
+      root.render(
+        <FlatSlider
+          label="Opacity"
+          value={99}
+          min={0}
+          max={100}
+          tier="explicitCustom"
+          displayValue="99%"
+          onCommit={vi.fn()}
+        />,
+      );
+    });
+    expect(track.getAttribute("aria-valuenow")).toBe("30");
+    act(() => {
+      // Capture lost with NO further render afterward — if the resync
+      // depended on a subsequent [value] effect run rather than reading
+      // latestValueRef directly, this would leave the knob stuck at 30.
+      track.dispatchEvent(new Event("lostpointercapture", { bubbles: true }));
+    });
+    expect(track.getAttribute("aria-valuenow")).toBe("99");
+    act(() => root.unmount());
+  });
 });
 
 describe("FlatSelectRow", () => {
@@ -963,47 +1011,6 @@ describe("FlatSelectRow — label/value options", () => {
     expect(options).toContain("difference");
     // And reselecting the (still-present) first preset must be an explicit
     // user choice, not something that already happened silently.
-    expect(onChange).not.toHaveBeenCalled();
-    act(() => root.unmount());
-  });
-});
-
-describe("FlatToggle", () => {
-  it("renders the off state with a dim label and dim knob, and fires onChange(true) on click", () => {
-    const onChange = vi.fn();
-    const { host, root } = renderInto(
-      <FlatToggle label="Loop" checked={false} onChange={onChange} />,
-    );
-    const label = host.querySelector('[data-flat-toggle-label="true"]');
-    expect(label?.className).toContain("text-panel-text-3");
-    const pill = host.querySelector<HTMLButtonElement>('[data-flat-toggle="true"]');
-    expect(pill).not.toBeNull();
-    act(() => pill?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    expect(onChange).toHaveBeenCalledWith(true);
-    act(() => root.unmount());
-  });
-
-  it("renders the on state with an emphasized label and mint knob, and fires onChange(false) on click", () => {
-    const onChange = vi.fn();
-    const { host, root } = renderInto(<FlatToggle label="Loop" checked onChange={onChange} />);
-    const label = host.querySelector('[data-flat-toggle-label="true"]');
-    expect(label?.className).toContain("text-panel-text-2");
-    const knob = host.querySelector('[data-flat-toggle-knob="true"]');
-    expect(knob?.className).toContain("bg-panel-accent");
-    const pill = host.querySelector<HTMLButtonElement>('[data-flat-toggle="true"]');
-    act(() => pill?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    expect(onChange).toHaveBeenCalledWith(false);
-    act(() => root.unmount());
-  });
-
-  it("does not fire onChange when disabled", () => {
-    const onChange = vi.fn();
-    const { host, root } = renderInto(
-      <FlatToggle label="Loop" checked={false} disabled onChange={onChange} />,
-    );
-    const pill = host.querySelector<HTMLButtonElement>('[data-flat-toggle="true"]');
-    expect(pill?.disabled).toBe(true);
-    act(() => pill?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(onChange).not.toHaveBeenCalled();
     act(() => root.unmount());
   });

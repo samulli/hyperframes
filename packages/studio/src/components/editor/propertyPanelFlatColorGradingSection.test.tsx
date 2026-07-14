@@ -238,6 +238,10 @@ describe("FlatColorGradingSection — Preset + LUT", () => {
     );
     if (!presetSelect) throw new Error("expected a preset select");
     expect(presetSelect.value).toBe("neutral");
+    // The visible "Preset" label is a sibling span outside FlatSelectRow
+    // (label="" there, to avoid rendering it twice) — the select still
+    // needs its own accessible name via the dedicated ariaLabel prop.
+    expect(presetSelect.getAttribute("aria-label")).toBe("Preset");
     act(() => {
       presetSelect.value = "fresh-pop";
       presetSelect.dispatchEvent(new Event("change", { bubbles: true }));
