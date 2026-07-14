@@ -70,7 +70,7 @@ import {
   type SubTimelineWaitOutcome,
   resolveBrowserGpuMode,
   resolveHeadlessShellPath,
-  shouldClampToScreenshotForConcreteGpu,
+  applyConcreteGpuScreenshotClamp,
   scaleProtocolTimeoutForComposition,
   isMemoryExhaustionError,
   isTransientBrowserError,
@@ -1909,25 +1909,27 @@ export async function executeRenderJob(
       chromePath: resolveHeadlessShellPath(cfg),
       browserTimeout: cfg.browserTimeout,
     });
-    // Mirror the frameCapture.ts routing invariant here so observability
-    // reports the actual capture mode on `browserGpuMode: "auto"` renders
-    // that probe to software: `resolveConfig` couldn't see this at config
-    // time, so `captureObservability.forceScreenshot` was still false,
-    // misreporting `captureMode: "beginframe"` for a session that will
-    // actually take the screenshot path. Both env and programmatic opt-outs
-    // preserved via the shared helper (the programmatic one carried on the
+    // Apply the software-GPU→screenshot clamp to the AUTHORITATIVE local
+    // `captureForceScreenshot` (not just the observability copy) so all
+    // downstream strategy + telemetry code reads the corrected value.
+    // Otherwise: `frameCapture.ts` clamps its own local and routes
+    // screenshot, but the still-`false` orchestrator local (a) mislabels the
+    // parallel-stream logging as "beginframe" below and (b) overwrites the
+    // earlier observability correction back to BeginFrame at the
+    // capture_strategy telemetry site. `resolveConfig` couldn't see
+    // `browserGpuMode:"auto"` resolving to software at config time, so
+    // `captureForceScreenshot` was still `compileResult.forceScreenshot === false`
+    // on that path. Both env and programmatic opt-outs preserved via
+    // `applyConcreteGpuScreenshotClamp` (the programmatic one carried on the
     // config as `forceScreenshotExplicitlyOptedOut`).
-    const observabilityForceScreenshot =
-      captureObservability.forceScreenshot ||
-      shouldClampToScreenshotForConcreteGpu(
-        resolvedBrowserGpuMode,
-        captureObservability.forceScreenshot,
-        process.env,
-        { programmaticOptOut: cfg.forceScreenshotExplicitlyOptedOut ?? false },
-      );
+    captureForceScreenshot = applyConcreteGpuScreenshotClamp(
+      captureForceScreenshot,
+      resolvedBrowserGpuMode,
+      cfg,
+    );
     updateCaptureObservability({
       browserGpuMode: resolvedBrowserGpuMode,
-      forceScreenshot: observabilityForceScreenshot,
+      forceScreenshot: captureForceScreenshot,
     });
     const videoCaptureBeyondViewport = resolveVideoCaptureBeyondViewport(composition.videos.length);
 

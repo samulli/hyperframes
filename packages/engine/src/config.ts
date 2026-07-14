@@ -661,3 +661,31 @@ export function shouldClampToScreenshotForConcreteGpu(
   if (opts.programmaticOptOut) return false;
   return env["PRODUCER_FORCE_SCREENSHOT"] !== "false";
 }
+
+/**
+ * Caller-facing pair to `shouldClampToScreenshotForConcreteGpu`: computes the
+ * value the *authoritative* `forceScreenshot` local should hold after the
+ * concrete-resolved-GPU decision fires. Returns the (possibly-promoted) new
+ * boolean, so the caller can assign it back to its local — driving both
+ * routing AND telemetry from one source of truth.
+ *
+ * Reads the programmatic opt-out from `cfg.forceScreenshotExplicitlyOptedOut`
+ * (set by `resolveConfig` when EITHER env `PRODUCER_FORCE_SCREENSHOT=false`
+ * OR programmatic `overrides.forceScreenshot === false` was present).
+ *
+ * Idempotent: `applyConcreteGpuScreenshotClamp(true, ...)` returns `true`
+ * without consulting anything else.
+ */
+export function applyConcreteGpuScreenshotClamp(
+  currentForceScreenshot: boolean,
+  resolvedGpuMode: "software" | "hardware",
+  cfg: Pick<EngineConfig, "forceScreenshotExplicitlyOptedOut"> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    currentForceScreenshot ||
+    shouldClampToScreenshotForConcreteGpu(resolvedGpuMode, currentForceScreenshot, env, {
+      programmaticOptOut: cfg?.forceScreenshotExplicitlyOptedOut ?? false,
+    })
+  );
+}

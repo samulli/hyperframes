@@ -6,7 +6,9 @@ import {
   DEFAULT_CONFIG,
   scaleProtocolTimeoutForComposition,
   shouldClampToScreenshotForConcreteGpu,
+  applyConcreteGpuScreenshotClamp,
 } from "./config.js";
+import type { EngineConfig } from "./config.js";
 import { isLowMemorySystem } from "./services/systemMemory.js";
 
 describe("resolveConfig", () => {
@@ -419,6 +421,77 @@ describe("resolveConfig", () => {
           { programmaticOptOut: true },
         ),
       ).toBe(false);
+    });
+  });
+
+  describe("applyConcreteGpuScreenshotClamp (caller-level contract)", () => {
+    // This is the helper both frameCapture.ts and renderOrchestrator.ts call
+    // to compute the value the AUTHORITATIVE `forceScreenshot` local should
+    // hold after the concrete GPU is resolved. Routing AND telemetry read
+    // from that one value, so this contract must hold across default and
+    // opt-out combinations.
+    type OptOutCfg = Pick<EngineConfig, "forceScreenshotExplicitlyOptedOut">;
+    const cleanEnv = {} as NodeJS.ProcessEnv;
+
+    it("resolved software + default false → promotes to true (screenshot route)", () => {
+      // The core auto→software fix: routing AND downstream telemetry read
+      // the promoted value, so `updateCaptureObservability({ forceScreenshot:
+      // captureForceScreenshot })` at the capture_strategy site reports
+      // screenshot instead of overwriting back to beginframe.
+      expect(applyConcreteGpuScreenshotClamp(false, "software", {} as OptOutCfg, cleanEnv)).toBe(
+        true,
+      );
+    });
+
+    it("resolved software + programmatic opt-out → stays false (BeginFrame preserved)", () => {
+      // The programmatic escape hatch caller-level contract: setting
+      // overrides.forceScreenshot=false must keep BeginFrame across BOTH
+      // routing (frameCapture) and telemetry (renderOrchestrator) — since
+      // resolveConfig lifts the flag onto the config, both callers converge.
+      expect(
+        applyConcreteGpuScreenshotClamp(
+          false,
+          "software",
+          { forceScreenshotExplicitlyOptedOut: true } as OptOutCfg,
+          cleanEnv,
+        ),
+      ).toBe(false);
+    });
+
+    it("resolved hardware + default false → stays false (no clamp needed)", () => {
+      expect(applyConcreteGpuScreenshotClamp(false, "hardware", {} as OptOutCfg, cleanEnv)).toBe(
+        false,
+      );
+    });
+
+    it("resolved software + already-true forceScreenshot → stays true (idempotent)", () => {
+      // Config-time clamp already fired (literal browserGpuMode:"software"),
+      // so re-applying at the concrete-resolved site is a no-op.
+      expect(applyConcreteGpuScreenshotClamp(true, "software", {} as OptOutCfg, cleanEnv)).toBe(
+        true,
+      );
+    });
+
+    it("resolved software + env PRODUCER_FORCE_SCREENSHOT=false → stays false", () => {
+      // Env opt-out preserved even when programmatic flag is not set (some
+      // callers, like debugging BeginFrame-on-software from CI, opt-out via
+      // env only).
+      expect(
+        applyConcreteGpuScreenshotClamp(
+          false,
+          "software",
+          {} as OptOutCfg,
+          {
+            PRODUCER_FORCE_SCREENSHOT: "false",
+          } as NodeJS.ProcessEnv,
+        ),
+      ).toBe(false);
+    });
+
+    it("resolved software + undefined cfg → default (no programmatic opt-out) → clamps to true", () => {
+      // Sanity: frameCapture.ts calls with `config` possibly undefined.
+      // Default case must still promote.
+      expect(applyConcreteGpuScreenshotClamp(false, "software", undefined, cleanEnv)).toBe(true);
     });
   });
 

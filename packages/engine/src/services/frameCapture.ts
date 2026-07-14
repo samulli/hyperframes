@@ -43,11 +43,7 @@ import {
   produceDrawElementFrameBatch,
 } from "./drawElementService.js";
 import { initThreeDProjection, detectCssEffectRisk } from "./threeDProjection.js";
-import {
-  DEFAULT_CONFIG,
-  shouldClampToScreenshotForConcreteGpu,
-  type EngineConfig,
-} from "../config.js";
+import { DEFAULT_CONFIG, applyConcreteGpuScreenshotClamp, type EngineConfig } from "../config.js";
 import type {
   CaptureOptions,
   CaptureVideoMetadataHint,
@@ -826,15 +822,15 @@ export async function createCaptureSession(
   // string, so `"auto"` that probes to software would otherwise slip through
   // and launch BeginFrame + SwiftShader (the exact combination the invariant
   // is meant to prevent). Both env and programmatic opt-outs preserved via
-  // the shared helper (the programmatic one carried on the config as
-  // `forceScreenshotExplicitlyOptedOut`, since at this point the boolean
-  // `forceScreenshot === false` is otherwise ambiguous between default and
-  // explicit opt-out).
-  const effectiveForceScreenshot =
-    forceScreenshot ||
-    shouldClampToScreenshotForConcreteGpu(resolvedGpuMode, forceScreenshot, process.env, {
-      programmaticOptOut: config?.forceScreenshotExplicitlyOptedOut ?? false,
-    });
+  // `applyConcreteGpuScreenshotClamp` (the programmatic one carried on the
+  // config as `forceScreenshotExplicitlyOptedOut`, since at this point the
+  // boolean `forceScreenshot === false` is otherwise ambiguous between
+  // default and explicit opt-out).
+  const effectiveForceScreenshot = applyConcreteGpuScreenshotClamp(
+    forceScreenshot,
+    resolvedGpuMode,
+    config,
+  );
   const preMode: CaptureMode =
     headlessShell &&
     isLinux &&
