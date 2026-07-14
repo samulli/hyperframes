@@ -16,19 +16,23 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
+import { sampleTweenBboxes } from "./animation-map-sampling.mjs";
 import { hyperframesPackageSpec, importPackagesOrBootstrap } from "./package-loader.mjs";
 
+const packages = await importPackagesOrBootstrap(["@hyperframes/producer", "@hyperframes/core"], {
+  npmPackages: [
+    hyperframesPackageSpec("@hyperframes/producer"),
+    hyperframesPackageSpec("@hyperframes/core"),
+  ],
+});
 const {
   createFileServer,
   createCaptureSession,
   initializeSession,
   closeCaptureSession,
   getCompositionDuration,
-} = (
-  await importPackagesOrBootstrap(["@hyperframes/producer"], {
-    npmPackages: [hyperframesPackageSpec("@hyperframes/producer")],
-  })
-)["@hyperframes/producer"];
+} = packages["@hyperframes/producer"];
+const { parseFps } = packages["@hyperframes/core"];
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -40,7 +44,9 @@ const OUT_DIR = resolve(args.out ?? ".hyperframes/anim-map");
 const MIN_DUR = Number(args["min-duration"] ?? 0.15);
 const WIDTH = Number(args.width ?? 1920);
 const HEIGHT = Number(args.height ?? 1080);
-const FPS = Number(args.fps ?? 30);
+const parsedFps = parseFps(args.fps ?? 30);
+if (!parsedFps.ok) die(`Invalid --fps "${args.fps ?? ""}": ${parsedFps.reason}`);
+const FPS = parsedFps.value;
 const COMP_DIR = resolve(args.composition);
 
 await mkdir(OUT_DIR, { recursive: true });
@@ -77,12 +83,7 @@ try {
       (_, k) => +(tw.start + ((k + 0.5) / FRAMES) * (tw.end - tw.start)).toFixed(3),
     );
 
-    const bboxes = [];
-    for (const t of times) {
-      await seekTo(session, t);
-      const bbox = await measureTarget(session, tw.selectorHint);
-      bboxes.push({ t, ...bbox });
-    }
+    const bboxes = await sampleTweenBboxes(session.page, tw.selectorHint, times);
 
     const animProps = tw.props.filter(
       (p) => !["parent", "overwrite", "immediateRender", "startAt", "runBackwards"].includes(p),
@@ -203,23 +204,6 @@ async function enumerateTweens(session) {
     results.sort((a, b) => a.start - b.start);
     return results;
   });
-}
-
-async function measureTarget(session, selector) {
-  return await session.page.evaluate((sel) => {
-    const el = document.querySelector(sel);
-    if (!el) return { x: 0, y: 0, w: 0, h: 0, missing: true };
-    const r = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
-    return {
-      x: Math.round(r.x),
-      y: Math.round(r.y),
-      w: Math.round(r.width),
-      h: Math.round(r.height),
-      opacity: parseFloat(cs.opacity),
-      visible: cs.visibility !== "hidden" && cs.display !== "none",
-    };
-  }, selector);
 }
 
 // ─── Tween description (the key output for agents) ──────────────────────────
